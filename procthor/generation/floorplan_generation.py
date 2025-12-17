@@ -659,8 +659,65 @@ def get_bedroom_size_penalty(room_spec: RoomSpec, floorplan: np.ndarray) -> floa
     return penalty
 
 
-def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
-    """Calculate the quality of the floorplan based on the room specifications."""
+def get_room_size_constraint_penalty(
+    room_spec: RoomSpec,
+    floorplan: np.ndarray,
+    cell_size_sqm: float = 3.6,  # Default: 1.9m scale squared
+) -> float:
+    """Penalty for rooms that are outside their target size constraints.
+
+    Uses the room_sizing module to evaluate if rooms are appropriately sized.
+
+    Args:
+        room_spec: The room specification
+        floorplan: The current floorplan grid
+        cell_size_sqm: Area of each grid cell in square meters
+    """
+    from procthor.generation.room_sizing import (
+        ROOM_SIZE_TARGETS_SQM,
+        get_room_size_penalty,
+        get_hallway_shape_penalty_for_dims,
+    )
+
+    penalty = 0.0
+
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type not in ROOM_SIZE_TARGETS_SQM:
+            continue
+
+        width, height, area_cells = get_room_dimensions(room_id, floorplan)
+        area_sqm = area_cells * cell_size_sqm
+
+        # Get size penalty
+        penalty += get_room_size_penalty(room_type, area_sqm, penalty_scale=0.05)
+
+        # Extra penalty for hallways that aren't narrow
+        if room_type == "Hallway":
+            # Convert cell dimensions to approximate meters
+            cell_side_m = cell_size_sqm ** 0.5
+            width_m = width * cell_side_m
+            height_m = height * cell_side_m
+            penalty += get_hallway_shape_penalty_for_dims(
+                min(width_m, height_m),
+                max(width_m, height_m),
+                penalty_scale=0.1
+            )
+
+    return penalty
+
+
+def score_floorplan(
+    room_spec: RoomSpec,
+    floorplan: np.ndarray,
+    cell_size_sqm: float = 3.6,
+) -> float:
+    """Calculate the quality of the floorplan based on the room specifications.
+
+    Args:
+        room_spec: The room specification
+        floorplan: The current floorplan grid
+        cell_size_sqm: Area of each grid cell in square meters (for size constraints)
+    """
     score = 0.0
 
     # Base score: how well do room sizes match the spec?
@@ -686,6 +743,9 @@ def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
 
     # Rule 7: Bedrooms must meet minimum size requirements (US building code)
     score += get_bedroom_size_penalty(room_spec, floorplan)
+
+    # Rule 8: Rooms should be within target size constraints
+    score += get_room_size_constraint_penalty(room_spec, floorplan, cell_size_sqm)
 
     return score
 
@@ -770,6 +830,7 @@ def generate_floorplan(
     room_spec: np.ndarray,
     interior_boundary: np.ndarray,
     candidate_generations: int = 100,
+    interior_boundary_scale: float = 1.9,
 ) -> np.ndarray:
     """Generate a floorplan for the given room spec and interior boundary.
 
@@ -778,7 +839,12 @@ def generate_floorplan(
         interior_boundary: Interior boundary of the floorplan.
         candidate_generations: Number of candidate generations to generate. The
             best candidate floorplan is returned.
+        interior_boundary_scale: Scale factor (meters per grid cell) for size
+            constraint evaluation.
     """
+    # Calculate cell size in sqm for size constraint scoring
+    cell_size_sqm = interior_boundary_scale ** 2
+
     # NOTE: If there is only one room, the floorplan will always be the same.
     if len(room_spec.room_type_map) == 1:
         candidate_generations = 1
@@ -799,7 +865,11 @@ def generate_floorplan(
             continue
 
         valid_candidates += 1
-        score = score_floorplan(room_spec=room_spec, floorplan=floorplan)
+        score = score_floorplan(
+            room_spec=room_spec,
+            floorplan=floorplan,
+            cell_size_sqm=cell_size_sqm,
+        )
         if best_floorplan is None or score > best_score:
             best_floorplan = floorplan
             best_score = score
