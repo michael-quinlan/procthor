@@ -17,6 +17,7 @@ from .connectivity import (
     build_room_adjacency_graph,
     validate_room_constraints,
     validate_private_room_access,
+    validate_strict_door_rules,
     InvalidConnectivity,
 )
 from .color_objects import default_randomize_object_colors
@@ -212,11 +213,23 @@ class HouseGenerator:
                 )
                 randomize_wall_and_floor_materials(partial_house, pt_db=self.pt_db)
 
-                # Validate room connectivity
+                # Validate room connectivity based on actual door placement
                 adjacency = build_room_adjacency_graph(
                     doors=partial_house.doors,
                     room_type_map=partial_house.room_spec.room_type_map,
                 )
+
+                # Check door-based connectivity rules (warning only)
+                # The door placement logic in doors.py handles these rules proactively
+                strict_errors = validate_strict_door_rules(
+                    room_spec=partial_house.room_spec,
+                    adjacency=adjacency,
+                )
+                if strict_errors:
+                    logging.warning(
+                        "Door connectivity issues (handled by door placement):\n"
+                        + "\n".join(strict_errors)
+                    )
 
                 # Check explicit constraints from room specs
                 constraint_errors = validate_room_constraints(
@@ -224,7 +237,6 @@ class HouseGenerator:
                     adjacency=adjacency,
                 )
                 if constraint_errors:
-                    # Log as warning for now - door placement doesn't yet respect constraints
                     logging.warning(
                         "Room connectivity constraints not satisfied (non-fatal):\n"
                         + "\n".join(constraint_errors)

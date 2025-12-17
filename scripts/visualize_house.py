@@ -14,7 +14,8 @@ room_type_to_color = {
 }
 
 def plot_house(house, ax, title):
-    """Plot a single house floorplan."""
+    """Plot a single house floorplan with doors."""
+    # Draw rooms
     for room_id, room in house.rooms.items():
         poly = room.room_polygon.polygon.exterior.coords
         xs = [p[0] for p in poly]
@@ -25,6 +26,41 @@ def plot_house(house, ax, title):
         centroid = room.room_polygon.polygon.centroid
         ax.text(centroid.x, centroid.y, f"{room.room_type}\n({room_id})",
                 ha='center', va='center', fontsize=7, fontweight='bold')
+
+    # Draw doors on top of walls
+    if "doors" in house.data and house.data["doors"]:
+        for door in house.data["doors"]:
+            # Get wall coordinates from wall0 id: "wall|room_id|x0|z0|x1|z1"
+            wall_id = door.get("wall0", "")
+            parts = wall_id.split("|")
+            if len(parts) >= 6:
+                try:
+                    x0, z0, x1, z1 = float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5])
+
+                    # holePolygon x values are positions along the wall
+                    if "holePolygon" in door and len(door["holePolygon"]) >= 2:
+                        hole_start = float(door["holePolygon"][0]["x"])
+                        hole_end = float(door["holePolygon"][1]["x"])
+
+                        # Calculate wall direction
+                        wall_len = ((x1 - x0)**2 + (z1 - z0)**2)**0.5
+                        if wall_len > 0:
+                            dx = (x1 - x0) / wall_len
+                            dz = (z1 - z0) / wall_len
+
+                            # Door start and end positions along the wall
+                            door_x0 = x0 + hole_start * dx
+                            door_z0 = z0 + hole_start * dz
+                            door_x1 = x0 + hole_end * dx
+                            door_z1 = z0 + hole_end * dz
+
+                            # Draw door as white gap with brown border (door frame)
+                            ax.plot([door_x0, door_x1], [door_z0, door_z1],
+                                   color='white', linewidth=8, solid_capstyle='butt', zorder=10)
+                            ax.plot([door_x0, door_x1], [door_z0, door_z1],
+                                   color='#8B4513', linewidth=3, solid_capstyle='butt', zorder=11)
+                except (ValueError, IndexError):
+                    pass
 
     ax.set_aspect('equal')
     ax.set_title(title, fontsize=10)
@@ -38,10 +74,15 @@ def create_custom_spec(num_bedrooms: int, num_bathrooms: int, spec_id: str) -> R
     """Create a house spec with specified number of bedrooms and bathrooms.
 
     Always includes: 1 Kitchen, 1 LivingRoom, 1 Hallway
+
+    Structure ensures:
+    - Hallway connects public and private zones
+    - At least one bathroom is in the hallway zone (for guest access)
+    - Bedrooms connect to hallway
     """
     room_id = 2
 
-    # Public rooms
+    # Public rooms (Kitchen + LivingRoom)
     kitchen = LeafRoom(room_id=room_id, ratio=2, room_type="Kitchen")
     room_id += 1
 
@@ -51,22 +92,35 @@ def create_custom_spec(num_bedrooms: int, num_bathrooms: int, spec_id: str) -> R
     hallway = LeafRoom(room_id=room_id, ratio=1, room_type="Hallway")
     room_id += 1
 
-    # Private rooms
-    private_rooms = []
+    # First bathroom goes with hallway (guest bathroom - public access)
+    guest_bathroom = LeafRoom(room_id=room_id, ratio=1, room_type="Bathroom")
+    room_id += 1
+
+    # Bedrooms
+    bedrooms = []
     for i in range(num_bedrooms):
         bedroom = LeafRoom(room_id=room_id, ratio=2, room_type="Bedroom")
         room_id += 1
-        private_rooms.append(bedroom)
+        bedrooms.append(bedroom)
 
-    for i in range(num_bathrooms):
+    # Additional bathrooms go with bedrooms (en-suite style)
+    extra_bathrooms = []
+    for i in range(num_bathrooms - 1):
         bathroom = LeafRoom(room_id=room_id, ratio=1, room_type="Bathroom")
         room_id += 1
-        private_rooms.append(bathroom)
+        extra_bathrooms.append(bathroom)
 
-    # Structure: [Public zone] - Hallway - [Private zone]
+    # Structure:
+    # [Public: Kitchen + LivingRoom] adjacent to [Hallway zone: Hallway + Guest Bath] adjacent to [Private: Bedrooms + Extra Baths]
     public = MetaRoom(ratio=5, children=[kitchen, living])
-    private = MetaRoom(ratio=num_bedrooms * 2 + num_bathrooms, children=private_rooms)
-    house = MetaRoom(ratio=10 + len(private_rooms), children=[public, hallway, private])
+    hallway_zone = MetaRoom(ratio=2, children=[hallway, guest_bathroom])
+
+    private_rooms = bedrooms + extra_bathrooms
+    if private_rooms:
+        private = MetaRoom(ratio=num_bedrooms * 2 + len(extra_bathrooms), children=private_rooms)
+        house = MetaRoom(ratio=10 + len(private_rooms), children=[public, hallway_zone, private])
+    else:
+        house = MetaRoom(ratio=7, children=[public, hallway_zone])
 
     # Scale dims based on total room count
     total_rooms = 3 + num_bedrooms + num_bathrooms

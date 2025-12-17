@@ -734,6 +734,20 @@ def validate_strict_rules(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
             if min(width, height) < MIN_BEDROOM_DIMENSION_CELLS:
                 return False
 
+    # Rule: At least one bathroom must be accessible from a public area
+    # (not only through bedrooms) - ensures a "guest bathroom" exists
+    bathrooms = [rid for rid, rtype in room_spec.room_type_map.items() if rtype == "Bathroom"]
+    if bathrooms:
+        has_public_bathroom = False
+        for bathroom_id in bathrooms:
+            adjacent_ids = adjacencies.get(bathroom_id, set())
+            adjacent_types = {room_spec.room_type_map.get(adj_id) for adj_id in adjacent_ids}
+            if adjacent_types.intersection({"LivingRoom", "Hallway", "Kitchen"}):
+                has_public_bathroom = True
+                break
+        if not has_public_bathroom:
+            return False
+
     return True
 
 
