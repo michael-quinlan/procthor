@@ -13,6 +13,12 @@ from procthor.utils.types import InvalidFloorplan, SamplingVars, Split
 
 from ..databases import DEFAULT_PROCTHOR_DATABASE, ProcTHORDatabase
 from .ceiling_height import sample_ceiling_height
+from .connectivity import (
+    build_room_adjacency_graph,
+    validate_room_constraints,
+    validate_private_room_access,
+    InvalidConnectivity,
+)
 from .color_objects import default_randomize_object_colors
 from .doors import default_add_doors
 from .exterior_walls import default_add_exterior_walls
@@ -205,6 +211,35 @@ class HouseGenerator:
                     split=self.split,
                 )
                 randomize_wall_and_floor_materials(partial_house, pt_db=self.pt_db)
+
+                # Validate room connectivity
+                adjacency = build_room_adjacency_graph(
+                    doors=partial_house.doors,
+                    room_type_map=partial_house.room_spec.room_type_map,
+                )
+
+                # Check explicit constraints from room specs
+                constraint_errors = validate_room_constraints(
+                    room_spec=partial_house.room_spec,
+                    adjacency=adjacency,
+                )
+                if constraint_errors:
+                    # Log as warning for now - door placement doesn't yet respect constraints
+                    logging.warning(
+                        "Room connectivity constraints not satisfied (non-fatal):\n"
+                        + "\n".join(constraint_errors)
+                    )
+
+                # Check that private rooms can reach public spaces
+                access_errors = validate_private_room_access(
+                    room_spec=partial_house.room_spec,
+                    adjacency=adjacency,
+                )
+                if access_errors:
+                    logging.warning(
+                        "Private room access issues (non-fatal):\n"
+                        + "\n".join(access_errors)
+                    )
 
         floor_polygons = get_floor_polygons(
             xz_poly_map=partial_house.house_structure.xz_poly_map
