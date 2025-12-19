@@ -5,6 +5,12 @@ images/
 .github/workflows/main.yml
 *.DS_Store
 
+# Generated datasets and output files
+dataset_*/
+*.json
+*.png
+!procthor/**/*.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
