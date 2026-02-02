@@ -201,7 +201,7 @@ class ProceduralParameters(TypedDict):
 
 class RoomType(TypedDict):
     id: str
-    roomType: Literal["Kitchen", "LivingRoom", "Bedroom", "Bathroom"]
+    roomType: Literal["Kitchen", "LivingRoom", "Bedroom", "Bathroom", "Hallway"]
     floorMaterial: str
     floorPolygon: List[Vector3]
 
