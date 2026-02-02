@@ -224,7 +224,7 @@ def default_sample_house_structure(
 
 def create_empty_partial_house(
     xz_poly_map: Dict[int, XZPoly],
-    room_type_map: Dict[int, Literal["Bedroom", "Bathroom", "Kitchen", "LivingRoom"]],
+    room_type_map: Dict[int, Literal["Bedroom", "Bathroom", "Kitchen", "LivingRoom", "Hallway"]],
     ceiling_height: float,
 ) -> PartialHouse:
     walls = []
