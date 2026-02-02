@@ -864,6 +864,58 @@ def get_room_isolation_score(room_spec: RoomSpec, floorplan: np.ndarray) -> floa
     return score
 
 
+def validate_room_proportions(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
+    """Validate that room proportions are reasonable.
+
+    Returns False (rejects the candidate) if:
+    1. LivingRoom is smaller than any bedroom
+    2. Hallway is larger than any bedroom
+    3. LivingRoom is smaller than hallway
+
+    This is a hard rejection filter that runs before scoring to eliminate
+    fundamentally flawed candidates that the scoring system cannot recover from.
+    """
+    # Get room sizes (areas)
+    room_sizes = {}
+    for room_id, room_type in room_spec.room_type_map.items():
+        room_sizes[room_id] = (floorplan == room_id).sum()
+
+    # Group rooms by type for comparison
+    living_room_area = 0
+    hallway_areas = []
+    bedroom_areas = []
+
+    for room_id, room_type in room_spec.room_type_map.items():
+        area = room_sizes.get(room_id, 0)
+        if room_type == "LivingRoom":
+            living_room_area = area
+        elif room_type == "Hallway":
+            hallway_areas.append(area)
+        elif room_type == "Bedroom":
+            bedroom_areas.append(area)
+
+    # Rule 1: LivingRoom must be >= any bedroom
+    if living_room_area > 0 and bedroom_areas:
+        max_bedroom_area = max(bedroom_areas)
+        if living_room_area < max_bedroom_area:
+            return False  # Reject: LivingRoom smaller than a bedroom
+
+    # Rule 2: Hallway must be < any bedroom (hallway shouldn't be larger)
+    if hallway_areas and bedroom_areas:
+        max_hallway_area = max(hallway_areas)
+        min_bedroom_area = min(bedroom_areas)
+        if max_hallway_area > min_bedroom_area:
+            return False  # Reject: Hallway larger than a bedroom
+
+    # Rule 3: LivingRoom must be >= hallway
+    if living_room_area > 0 and hallway_areas:
+        max_hallway_area = max(hallway_areas)
+        if living_room_area < max_hallway_area:
+            return False  # Reject: LivingRoom smaller than hallway
+
+    return True  # Candidate passes validation
+
+
 def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     """Calculate the quality of the floorplan based on the room specifications."""
     score = 0.0
@@ -935,11 +987,15 @@ def generate_floorplan(
             recursively_expand_rooms(rooms=room_spec.spec, floorplan=floorplan)
         except InvalidFloorplan:
             continue
-        else:
-            score = score_floorplan(room_spec=room_spec, floorplan=floorplan)
-            if best_floorplan is None or score > best_score:
-                best_floorplan = floorplan
-                best_score = score
+
+        # Hard rejection for bad room proportions
+        if not validate_room_proportions(room_spec=room_spec, floorplan=floorplan):
+            continue
+
+        score = score_floorplan(room_spec=room_spec, floorplan=floorplan)
+        if best_floorplan is None or score > best_score:
+            best_floorplan = floorplan
+            best_score = score
 
     if best_floorplan is None:
         raise InvalidFloorplan(
