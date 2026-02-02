@@ -471,19 +471,40 @@ def get_room_adjacencies(floorplan: np.ndarray) -> dict:
     return adjacencies
 
 
-def get_hallway_shape_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+def get_hallway_shape_score(
+    room_spec: RoomSpec,
+    floorplan: np.ndarray,
+    interior_boundary_scale: float = 1.9,
+) -> float:
     """Score hallways based on their shape - prefer elongated hallways.
+
+    Args:
+        room_spec: The room specification.
+        floorplan: The floorplan array.
+        interior_boundary_scale: Meters per grid cell (default 1.9m).
 
     Returns:
         - Bonus if hallway has aspect ratio > 2 (elongated)
         - Penalty if hallway is too square (aspect ratio < 1.5)
+        - Penalty if hallway is too narrow (width < 1.5m)
     """
+    from procthor.generation.room_sizing import MIN_HALLWAY_WIDTH_M
+
     score = 0.0
     for room_id, room_type in room_spec.room_type_map.items():
         if room_type == "Hallway":
             width, height, area = get_room_dimensions(room_id, floorplan)
             if width == 0 or height == 0:
                 continue
+
+            # Convert grid cells to meters
+            min_dim_cells = min(width, height)
+            min_dim_meters = min_dim_cells * interior_boundary_scale
+
+            # Penalty for narrow hallways (less than MIN_HALLWAY_WIDTH_M)
+            # Hallways need space for multiple doors
+            if min_dim_meters < MIN_HALLWAY_WIDTH_M:
+                score -= 5.0  # Narrow hallway penalty
 
             # Aspect ratio: how elongated is the hallway?
             aspect_ratio = max(width, height) / min(width, height)
@@ -538,6 +559,51 @@ def get_hallway_connectivity_score(room_spec: RoomSpec, floorplan: np.ndarray) -
     return score
 
 
+def get_door_spacing_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Score floorplan based on door spacing feasibility.
+
+    Penalizes layouts where rooms have many shared boundaries, which increases
+    the likelihood of door spacing conflicts and "Might be unable to walk
+    between rooms" warnings.
+
+    Returns:
+        Score adjustment (negative for problematic layouts).
+    """
+    score = 0.0
+    adjacencies = get_room_adjacencies(floorplan)
+
+    # Count total adjacency pairs (each pair represents a potential door)
+    adjacency_pairs = set()
+    for room_id, neighbors in adjacencies.items():
+        for neighbor_id in neighbors:
+            pair = (min(room_id, neighbor_id), max(room_id, neighbor_id))
+            adjacency_pairs.add(pair)
+
+    num_rooms = len(room_spec.room_type_map)
+    num_adjacencies = len(adjacency_pairs)
+
+    # Penalty for high door density
+    # Ideal: roughly num_rooms - 1 doors for a tree-like connectivity
+    # Problematic: much more than that (mesh-like connectivity)
+    expected_doors = num_rooms - 1
+    excess_doors = max(0, num_adjacencies - expected_doors - 1)
+    score -= excess_doors * 0.5  # Penalty for each excess door
+
+    # Count rooms with 4+ neighbors (corner conflict prone)
+    high_connectivity_rooms = sum(
+        1 for neighbors in adjacencies.values() if len(neighbors) >= 4
+    )
+    score -= high_connectivity_rooms * 2.0  # Heavy penalty for highly-connected rooms
+
+    # Bonus for rooms with exactly 1-2 neighbors (simpler door placement)
+    simple_rooms = sum(
+        1 for neighbors in adjacencies.values() if len(neighbors) <= 2
+    )
+    score += simple_rooms * 0.3
+
+    return score
+
+
 def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     """Calculate the quality of the floorplan based on the room specifications."""
     score = 0.0
@@ -550,6 +616,9 @@ def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
 
     # Hallway connectivity: prefer hallways that connect multiple rooms
     score += get_hallway_connectivity_score(room_spec, floorplan)
+
+    # Door spacing: penalize layouts prone to door spacing conflicts
+    score += get_door_spacing_score(room_spec, floorplan)
 
     return score
 

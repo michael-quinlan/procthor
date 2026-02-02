@@ -24,6 +24,9 @@ ROOM_SIZE_TARGETS_SQM: Dict[str, Tuple[float, float, float]] = {
 # Conversion constant
 SQM_TO_SQFT = 10.7639
 
+# Minimum hallway width in meters (enough for 2 doors with padding)
+MIN_HALLWAY_WIDTH_M = 1.5
+
 
 @dataclass
 class RoomSizeSpec:
