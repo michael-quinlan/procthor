@@ -19,6 +19,7 @@ from procthor.utils.types import (
     Door,
     LeafRoom,
     MetaRoom,
+    PUBLIC_ROOM_TYPES,
     Split,
     Vector3,
     Wall,
@@ -77,6 +78,114 @@ EPSILON = 1e-3
 """Small value to compare floats within a bound."""
 
 
+def get_required_doors(
+    neighboring_rooms: Set[Tuple[int, int]],
+    room_type_map: Dict[int, str],
+) -> List[Tuple[int, int]]:
+    """Compute doors required by connectivity rules.
+
+    Rules:
+    1. Each bedroom must have a door to LivingRoom or Hallway
+    2. At least one bathroom must have a door to a public room
+    3. Each hallway must have a door to LivingRoom
+    4. Each hallway must have doors to at least 2 rooms
+
+    Args:
+        neighboring_rooms: Set of (room_id_1, room_id_2) tuples for adjacent rooms.
+        room_type_map: Mapping from room_id to room_type.
+
+    Returns:
+        List of (room_id_1, room_id_2) tuples for required doors.
+    """
+    required_doors: List[Tuple[int, int]] = []
+
+    # Helper to find adjacent rooms of specific types
+    def find_adjacent_of_type(room_id: int, target_types: Set[str]) -> List[int]:
+        """Find rooms adjacent to room_id that are of target_types."""
+        adjacent = []
+        for r1, r2 in neighboring_rooms:
+            if r1 == room_id and room_type_map.get(r2) in target_types:
+                adjacent.append(r2)
+            elif r2 == room_id and room_type_map.get(r1) in target_types:
+                adjacent.append(r1)
+        return adjacent
+
+    def add_door(room1: int, room2: int) -> None:
+        """Add a door between two rooms (normalized order)."""
+        door = (min(room1, room2), max(room1, room2))
+        if door not in required_doors and door in neighboring_rooms:
+            required_doors.append(door)
+
+    # Group rooms by type
+    bedrooms = [rid for rid, rtype in room_type_map.items() if rtype == "Bedroom"]
+    bathrooms = [rid for rid, rtype in room_type_map.items() if rtype == "Bathroom"]
+    hallways = [rid for rid, rtype in room_type_map.items() if rtype == "Hallway"]
+
+    # Rule 1: Each bedroom needs door to LivingRoom or Hallway
+    for bedroom_id in bedrooms:
+        # Try hallway first (preferred), then living room
+        adjacent_hallways = find_adjacent_of_type(bedroom_id, {"Hallway"})
+        if adjacent_hallways:
+            add_door(bedroom_id, random.choice(adjacent_hallways))
+        else:
+            adjacent_living = find_adjacent_of_type(bedroom_id, {"LivingRoom"})
+            if adjacent_living:
+                add_door(bedroom_id, random.choice(adjacent_living))
+
+    # Rule 2: Each bathroom gets exactly ONE door
+    # Priority: public room (hallway/living) > bedroom > any adjacent room
+    for bathroom_id in bathrooms:
+        # Try public room first (hallway, living room, kitchen)
+        adjacent_public = find_adjacent_of_type(bathroom_id, PUBLIC_ROOM_TYPES)
+        if adjacent_public:
+            add_door(bathroom_id, random.choice(adjacent_public))
+            continue
+
+        # Try bedroom (en-suite)
+        adjacent_bedrooms = find_adjacent_of_type(bathroom_id, {"Bedroom"})
+        if adjacent_bedrooms:
+            add_door(bathroom_id, random.choice(adjacent_bedrooms))
+            continue
+
+        # Fall back to any adjacent room
+        for r1, r2 in neighboring_rooms:
+            if r1 == bathroom_id and r2 in room_type_map:
+                add_door(bathroom_id, r2)
+                break
+            elif r2 == bathroom_id and r1 in room_type_map:
+                add_door(bathroom_id, r1)
+                break
+
+    # Rule 3: Each hallway needs door to LivingRoom
+    for hallway_id in hallways:
+        adjacent_living = find_adjacent_of_type(hallway_id, {"LivingRoom"})
+        if adjacent_living:
+            add_door(hallway_id, random.choice(adjacent_living))
+
+    # Rule 4: Hallways need at least 2 doors - add more if needed
+    for hallway_id in hallways:
+        # Count how many doors hallway already has
+        hallway_doors = [d for d in required_doors if hallway_id in d]
+        if len(hallway_doors) < 2:
+            # Find any adjacent room we can connect to
+            for r1, r2 in neighboring_rooms:
+                other_room = None
+                if r1 == hallway_id:
+                    other_room = r2
+                elif r2 == hallway_id:
+                    other_room = r1
+
+                if other_room is not None:
+                    door = (min(hallway_id, other_room), max(hallway_id, other_room))
+                    if door not in required_doors:
+                        required_doors.append(door)
+                        hallway_doors = [d for d in required_doors if hallway_id in d]
+                        if len(hallway_doors) >= 2:
+                            break
+
+    return required_doors
+
+
 def default_add_doors(
     partial_house: "PartialHouse",
     controller: Controller,
@@ -88,15 +197,56 @@ def default_add_doors(
 
     room_spec = partial_house.room_spec
     boundary_groups = partial_house.house_structure.boundary_groups
+    neighboring_rooms = set(boundary_groups.keys())
 
+    # First, get doors required by connectivity rules
+    required_doors = get_required_doors(
+        neighboring_rooms=neighboring_rooms,
+        room_type_map=room_spec.room_type_map,
+    )
+
+    # Then, get doors from the room spec hierarchy (for connectivity within MetaRooms)
     room_spec_neighbors = get_room_spec_neighbors(room_spec=room_spec.spec)
-    openings = select_openings(
-        neighboring_rooms=set(boundary_groups.keys()),
+    hierarchy_openings = select_openings(
+        neighboring_rooms=neighboring_rooms,
         room_spec_neighbors=room_spec_neighbors,
         room_spec=room_spec,
     )
+
+    # Track which bathrooms already have a door
+    bathrooms_with_doors: Set[int] = set()
+    for door in required_doors:
+        for room_id in door:
+            if room_spec.room_type_map.get(room_id) == "Bathroom":
+                bathrooms_with_doors.add(room_id)
+
+    # Combine: required doors + hierarchy doors (avoiding duplicates and forbidden connections)
+    all_openings = list(required_doors)
+    for opening in hierarchy_openings:
+        if opening not in all_openings:
+            room1_type = room_spec.room_type_map.get(opening[0])
+            room2_type = room_spec.room_type_map.get(opening[1])
+
+            # RULE: Never add doors between two bedrooms
+            if room1_type == "Bedroom" and room2_type == "Bedroom":
+                continue
+
+            # RULE: Bathrooms only get one door
+            if room1_type == "Bathroom" and opening[0] in bathrooms_with_doors:
+                continue
+            if room2_type == "Bathroom" and opening[1] in bathrooms_with_doors:
+                continue
+
+            all_openings.append(opening)
+
+            # Track if we just added a door to a bathroom
+            if room1_type == "Bathroom":
+                bathrooms_with_doors.add(opening[0])
+            if room2_type == "Bathroom":
+                bathrooms_with_doors.add(opening[1])
+
     door_walls = select_door_walls(
-        openings=openings,
+        openings=all_openings,
         boundary_groups=boundary_groups,
     )
 
