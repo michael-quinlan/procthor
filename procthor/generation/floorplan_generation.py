@@ -894,24 +894,24 @@ def validate_room_proportions(room_spec: RoomSpec, floorplan: np.ndarray) -> boo
         elif room_type == "Bedroom":
             bedroom_areas.append(area)
 
-    # Rule 1: LivingRoom must be >= any bedroom
+    # Rule 1: LivingRoom must be >= any bedroom * 1.3 (safety margin for cell-to-polygon variance)
     if living_room_area > 0 and bedroom_areas:
         max_bedroom_area = max(bedroom_areas)
-        if living_room_area < max_bedroom_area:
-            return False  # Reject: LivingRoom smaller than a bedroom
+        if living_room_area < max_bedroom_area * 1.3:
+            return False  # Reject: LivingRoom not sufficiently larger than a bedroom
 
-    # Rule 2: Hallway must be < any bedroom (hallway shouldn't be larger)
+    # Rule 2: Hallway must be <= any bedroom * 0.7 (safety margin for cell-to-polygon variance)
     if hallway_areas and bedroom_areas:
         max_hallway_area = max(hallway_areas)
         min_bedroom_area = min(bedroom_areas)
-        if max_hallway_area > min_bedroom_area:
-            return False  # Reject: Hallway larger than a bedroom
+        if max_hallway_area > min_bedroom_area * 0.7:
+            return False  # Reject: Hallway too large relative to smallest bedroom
 
-    # Rule 3: LivingRoom must be >= hallway
+    # Rule 3: LivingRoom must be >= hallway * 1.3 (safety margin for cell-to-polygon variance)
     if living_room_area > 0 and hallway_areas:
         max_hallway_area = max(hallway_areas)
-        if living_room_area < max_hallway_area:
-            return False  # Reject: LivingRoom smaller than hallway
+        if living_room_area < max_hallway_area * 1.3:
+            return False  # Reject: LivingRoom not sufficiently larger than hallway
 
     return True  # Candidate passes validation
 
