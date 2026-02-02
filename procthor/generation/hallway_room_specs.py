@@ -18,8 +18,8 @@ from procthor.generation.room_specs import RoomSpec, RoomSpecSampler
 RATIOS: Dict[str, int] = {
     "Bedroom": 4,       # ~14 sqm target
     "Bathroom": 2,      # ~6 sqm target
-    "Kitchen": 3,       # ~12 sqm target
-    "LivingRoom": 6,    # ~22 sqm target
+    "Kitchen": 6,       # ~25 sqm target (increased for better public zone priority)
+    "LivingRoom": 10,   # ~37 sqm target (increased for better public zone priority)
     "Hallway": 2,       # ~5 sqm target (narrow circulation)
 }
 
