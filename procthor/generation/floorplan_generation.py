@@ -559,6 +559,62 @@ def get_hallway_connectivity_score(room_spec: RoomSpec, floorplan: np.ndarray) -
     return score
 
 
+def get_living_room_shape_score(
+    room_spec: RoomSpec,
+    floorplan: np.ndarray,
+    interior_boundary_scale: float = 1.9,
+) -> float:
+    """Score living rooms based on shape quality.
+
+    Args:
+        room_spec: The room specification.
+        floorplan: The floorplan array.
+        interior_boundary_scale: Meters per grid cell (default 1.9m).
+
+    Returns:
+        - Bonus if aspect ratio is 1:1 to 2:1 (ideal rectangle): +2.0
+        - No change if aspect ratio is 2:1 to 3:1
+        - Penalty if aspect ratio > 3:1 (too narrow): -3.0
+        - Penalty if width < 3m (can't fit furniture): -5.0
+        - Penalty if room is fragmented (non-contiguous): -10.0
+    """
+    from scipy import ndimage
+
+    score = 0.0
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type == "LivingRoom":
+            width, height, area = get_room_dimensions(room_id, floorplan)
+            if width == 0 or height == 0:
+                continue
+
+            # Check for fragmentation (non-contiguous cells)
+            room_mask = floorplan == room_id
+            labeled_array, num_features = ndimage.label(room_mask)
+            if num_features > 1:
+                score -= 10.0  # Fragmented room - heavy penalty
+                continue  # Skip other checks for fragmented rooms
+
+            # Convert grid cells to meters
+            min_dim_cells = min(width, height)
+            min_dim_meters = min_dim_cells * interior_boundary_scale
+
+            # Penalty for narrow living rooms (width < 3m)
+            if min_dim_meters < 3.0:
+                score -= 5.0  # Too narrow to furnish
+
+            # Aspect ratio scoring
+            aspect_ratio = max(width, height) / min(width, height)
+
+            if aspect_ratio <= 2.0:
+                score += 2.0  # Ideal rectangle (1:1 to 2:1)
+            elif aspect_ratio <= 3.0:
+                pass  # Acceptable (2:1 to 3:1) - no change
+            else:
+                score -= 3.0  # Too narrow (> 3:1)
+
+    return score
+
+
 def get_door_spacing_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     """Score floorplan based on door spacing feasibility.
 
@@ -604,6 +660,77 @@ def get_door_spacing_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     return score
 
 
+def get_room_proportion_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Score based on room size relationships.
+
+    Returns:
+        - Bonus if living room is the largest room (+3.0)
+        - Penalty if living room is NOT largest (-5.0)
+        - Penalty if hallway is larger than any bedroom (-5.0)
+        - Bonus if hallway is smaller than all bedrooms (+2.0)
+        - Bonus if kitchen+living is 40-50% of total area (+2.0)
+        - Penalty if kitchen+living is <30% or >60% of total area (-3.0)
+    """
+    score = 0.0
+
+    # Get room sizes (areas)
+    room_sizes = {}
+    total_area = (floorplan != OUTDOOR_ROOM_ID).sum()
+    if total_area == 0:
+        return score
+
+    for room_id, room_type in room_spec.room_type_map.items():
+        room_sizes[room_id] = (floorplan == room_id).sum()
+
+    # Group rooms by type for comparison
+    living_room_area = 0
+    kitchen_area = 0
+    hallway_areas = []
+    bedroom_areas = []
+
+    for room_id, room_type in room_spec.room_type_map.items():
+        area = room_sizes.get(room_id, 0)
+        if room_type == "LivingRoom":
+            living_room_area = area
+        elif room_type == "Kitchen":
+            kitchen_area = area
+        elif room_type == "Hallway":
+            hallway_areas.append(area)
+        elif room_type == "Bedroom":
+            bedroom_areas.append(area)
+
+    # Get the largest room size overall
+    max_room_size = max(room_sizes.values()) if room_sizes else 0
+
+    # Rule 1: LivingRoom should be the largest room
+    if living_room_area > 0:
+        if living_room_area >= max_room_size:
+            score += 3.0  # LivingRoom is largest → bonus
+        else:
+            score -= 5.0  # LivingRoom is NOT largest → penalty
+
+    # Rule 2: Hallway vs Bedroom comparison
+    if hallway_areas and bedroom_areas:
+        min_bedroom_area = min(bedroom_areas)
+        max_hallway_area = max(hallway_areas)
+
+        if max_hallway_area > min_bedroom_area:
+            score -= 5.0  # Hallway larger than some bedroom → penalty
+        else:
+            score += 2.0  # Hallway smaller than all bedrooms → bonus
+
+    # Rule 3: Kitchen + LivingRoom proportion of total house
+    combined_area = kitchen_area + living_room_area
+    if combined_area > 0:
+        proportion = combined_area / total_area
+        if 0.40 <= proportion <= 0.50:
+            score += 2.0  # Kitchen+LivingRoom is 40-50% → bonus
+        elif proportion < 0.30 or proportion > 0.60:
+            score -= 3.0  # Kitchen+LivingRoom is <30% or >60% → penalty
+
+    return score
+
+
 def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     """Calculate the quality of the floorplan based on the room specifications."""
     score = 0.0
@@ -619,6 +746,12 @@ def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
 
     # Door spacing: penalize layouts prone to door spacing conflicts
     score += get_door_spacing_score(room_spec, floorplan)
+
+    # Room proportions: ensure proper room size relationships
+    score += get_room_proportion_score(room_spec, floorplan)
+
+    # Living room shape: penalize narrow, fragmented, or oddly shaped living rooms
+    score += get_living_room_shape_score(room_spec, floorplan)
 
     return score
 
