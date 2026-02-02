@@ -77,29 +77,77 @@ def create_hallway_room_spec(
     room_id += 1
 
     # Private rooms: Bedrooms and bathrooms
+    # For 2+ bathrooms, create a master suite (master bedroom + master bath)
     private_rooms = []
     private_zone_ratio = 0
 
-    for i in range(num_bedrooms):
-        bedroom = LeafRoom(
-            room_id=room_id,
-            ratio=RATIOS["Bedroom"],
-            room_type="Bedroom",
-        )
-        private_rooms.append(bedroom)
-        private_zone_ratio += RATIOS["Bedroom"]
-        room_id += 1
-
-    for i in range(num_bathrooms):
-        bathroom = LeafRoom(
+    if num_bathrooms >= 2:
+        # Master suite: master bedroom + master bath nested together
+        # The master bath will only connect to master bedroom (not hallway)
+        master_bath = LeafRoom(
             room_id=room_id,
             ratio=RATIOS["Bathroom"],
             room_type="Bathroom",
             avoid_doors_from_metarooms=True,
         )
-        private_rooms.append(bathroom)
-        private_zone_ratio += RATIOS["Bathroom"]
         room_id += 1
+
+        master_bedroom = LeafRoom(
+            room_id=room_id,
+            ratio=RATIOS["Bedroom"],
+            room_type="Bedroom",
+        )
+        room_id += 1
+
+        master_suite_ratio = RATIOS["Bedroom"] + RATIOS["Bathroom"]
+        master_suite = MetaRoom(ratio=master_suite_ratio, children=[master_bedroom, master_bath])
+        private_rooms.append(master_suite)
+        private_zone_ratio += master_suite_ratio
+
+        # Other bedrooms (not in master suite)
+        for i in range(num_bedrooms - 1):
+            bedroom = LeafRoom(
+                room_id=room_id,
+                ratio=RATIOS["Bedroom"],
+                room_type="Bedroom",
+            )
+            private_rooms.append(bedroom)
+            private_zone_ratio += RATIOS["Bedroom"]
+            room_id += 1
+
+        # Hall bath(s): can connect to hallway or other rooms
+        for i in range(num_bathrooms - 1):
+            hall_bath = LeafRoom(
+                room_id=room_id,
+                ratio=RATIOS["Bathroom"],
+                room_type="Bathroom",
+                avoid_doors_from_metarooms=True,
+            )
+            private_rooms.append(hall_bath)
+            private_zone_ratio += RATIOS["Bathroom"]
+            room_id += 1
+    else:
+        # 1 bathroom: no master suite, flat structure
+        for i in range(num_bedrooms):
+            bedroom = LeafRoom(
+                room_id=room_id,
+                ratio=RATIOS["Bedroom"],
+                room_type="Bedroom",
+            )
+            private_rooms.append(bedroom)
+            private_zone_ratio += RATIOS["Bedroom"]
+            room_id += 1
+
+        for i in range(num_bathrooms):
+            bathroom = LeafRoom(
+                room_id=room_id,
+                ratio=RATIOS["Bathroom"],
+                room_type="Bathroom",
+                avoid_doors_from_metarooms=True,
+            )
+            private_rooms.append(bathroom)
+            private_zone_ratio += RATIOS["Bathroom"]
+            room_id += 1
 
     private_zone = MetaRoom(ratio=private_zone_ratio, children=private_rooms)
 
