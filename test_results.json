@@ -1,0 +1,262 @@
+[
+  {
+    "house_id": 1,
+    "rooms": {
+      "Bedroom": [
+        {
+          "id": 4,
+          "num_vertices": 8
+        }
+      ],
+      "Bathroom": [
+        {
+          "id": 5,
+          "num_vertices": 5
+        }
+      ],
+      "Kitchen": [
+        {
+          "id": 6,
+          "num_vertices": 8
+        }
+      ],
+      "LivingRoom": [
+        {
+          "id": 7,
+          "num_vertices": 6
+        }
+      ]
+    },
+    "success": true
+  },
+  {
+    "house_id": 2,
+    "rooms": {
+      "Bedroom": [
+        {
+          "id": 2,
+          "num_vertices": 7
+        }
+      ]
+    },
+    "success": true
+  },
+  {
+    "house_id": 3,
+    "rooms": {
+      "Bedroom": [
+        {
+          "id": 4,
+          "num_vertices": 7
+        },
+        {
+          "id": 6,
+          "num_vertices": 9
+        }
+      ],
+      "Bathroom": [
+        {
+          "id": 5,
+          "num_vertices": 5
+        },
+        {
+          "id": 7,
+          "num_vertices": 5
+        }
+      ],
+      "Kitchen": [
+        {
+          "id": 8,
+          "num_vertices": 6
+        }
+      ],
+      "LivingRoom": [
+        {
+          "id": 9,
+          "num_vertices": 9
+        }
+      ]
+    },
+    "success": true
+  },
+  {
+    "house_id": 4,
+    "rooms": {
+      "Kitchen": [
+        {
+          "id": 2,
+          "num_vertices": 5
+        }
+      ],
+      "LivingRoom": [
+        {
+          "id": 3,
+          "num_vertices": 10
+        }
+      ]
+    },
+    "success": true
+  },
+  {
+    "house_id": 5,
+    "rooms": {
+      "Bedroom": [
+        {
+          "id": 4,
+          "num_vertices": 7
+        }
+      ],
+      "Bathroom": [
+        {
+          "id": 5,
+          "num_vertices": 9
+        }
+      ],
+      "Kitchen": [
+        {
+          "id": 6,
+          "num_vertices": 7
+        }
+      ],
+      "LivingRoom": [
+        {
+          "id": 7,
+          "num_vertices": 10
+        }
+      ]
+    },
+    "success": true
+  },
+  {
+    "house_id": 6,
+    "rooms": {
+      "Bedroom": [
+        {
+          "id": 2,
+          "num_vertices": 7
+        }
+      ],
+      "Bathroom": [
+        {
+          "id": 3,
+          "num_vertices": 6
+        }
+      ]
+    },
+    "success": true
+  },
+  {
+    "house_id": 7,
+    "rooms": {
+      "Kitchen": [
+        {
+          "id": 6,
+          "num_vertices": 5
+        }
+      ],
+      "LivingRoom": [
+        {
+          "id": 7,
+          "num_vertices": 7
+        }
+      ],
+      "Bedroom": [
+        {
+          "id": 2,
+          "num_vertices": 6
+        }
+      ]
+    },
+    "success": true
+  },
+  {
+    "house_id": 8,
+    "rooms": {
+      "Bedroom": [
+        {
+          "id": 4,
+          "num_vertices": 7
+        }
+      ],
+      "Bathroom": [
+        {
+          "id": 5,
+          "num_vertices": 5
+        }
+      ],
+      "Kitchen": [
+        {
+          "id": 6,
+          "num_vertices": 5
+        }
+      ],
+      "LivingRoom": [
+        {
+          "id": 7,
+          "num_vertices": 6
+        }
+      ]
+    },
+    "success": true
+  },
+  {
+    "house_id": 9,
+    "rooms": {
+      "Bedroom": [
+        {
+          "id": 4,
+          "num_vertices": 6
+        }
+      ],
+      "Bathroom": [
+        {
+          "id": 5,
+          "num_vertices": 6
+        }
+      ],
+      "Kitchen": [
+        {
+          "id": 6,
+          "num_vertices": 7
+        }
+      ],
+      "LivingRoom": [
+        {
+          "id": 7,
+          "num_vertices": 6
+        }
+      ]
+    },
+    "success": true
+  },
+  {
+    "house_id": 10,
+    "rooms": {
+      "Bedroom": [
+        {
+          "id": 4,
+          "num_vertices": 10
+        }
+      ],
+      "Bathroom": [
+        {
+          "id": 5,
+          "num_vertices": 8
+        }
+      ],
+      "Kitchen": [
+        {
+          "id": 6,
+          "num_vertices": 6
+        }
+      ],
+      "LivingRoom": [
+        {
+          "id": 7,
+          "num_vertices": 6
+        }
+      ]
+    },
+    "success": true
+  }
+]
