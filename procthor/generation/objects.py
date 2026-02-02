@@ -505,7 +505,7 @@ class ProceduralRoom:
     def __init__(
         self,
         polygon: Sequence[Tuple[int, int]],
-        room_type: Literal["Kitchen", "LivingRoom", "Bedroom", "Bathroom"],
+        room_type: Literal["Kitchen", "LivingRoom", "Bedroom", "Bathroom", "Hallway"],
         room_id: int,
         split: Split,
         door_polygons: List[Polygon],
@@ -514,10 +514,10 @@ class ProceduralRoom:
         """
 
         Parameters:
-        - room_type: str must be in {"Kitchen", "LivingRoom", "Bedroom", "Bathroom"}.
+        - room_type: str must be in {"Kitchen", "LivingRoom", "Bedroom", "Bathroom", "Hallway"}.
         - split: str must be in {"train", "val", "test"}.
         """
-        assert room_type in {"Kitchen", "LivingRoom", "Bedroom", "Bathroom"}
+        assert room_type in {"Kitchen", "LivingRoom", "Bedroom", "Bathroom", "Hallway"}
         assert split in {"train", "val", "test"}
 
         self.room_polygon = OrthogonalPolygon(polygon=copy.deepcopy(polygon))
@@ -915,6 +915,7 @@ class ProceduralRoom:
             "LivingRoom": "#d9f7be",
             "Bedroom": "#fff1b8",
             "Bathroom": "#bae7ff",
+            "Hallway": "#e6e6e6",
         }
         plt.fill(
             xs,
@@ -1208,6 +1209,8 @@ def default_add_floor_objects(
 
     partial_house.objects = []
     for room in partial_house.rooms.values():
+        if room.room_type == "Hallway":
+            continue
         allow_house_plant_group = random.random() < p_allow_house_plant_group
         allow_tv_group = random.random() < p_allow_tv_group
 
