@@ -572,11 +572,11 @@ def get_living_room_shape_score(
         interior_boundary_scale: Meters per grid cell (default 1.9m).
 
     Returns:
-        - Bonus if aspect ratio is 1:1 to 2:1 (ideal rectangle): +2.0
+        - Bonus if aspect ratio is 1:1 to 2:1 (ideal rectangle): +5.0
         - No change if aspect ratio is 2:1 to 3:1
-        - Penalty if aspect ratio > 3:1 (too narrow): -3.0
-        - Penalty if width < 3m (can't fit furniture): -5.0
-        - Penalty if room is fragmented (non-contiguous): -10.0
+        - Penalty if aspect ratio > 3:1 (too narrow): -15.0
+        - Penalty if width < 3m (can't fit furniture): -20.0
+        - Penalty if room is fragmented (non-contiguous): -30.0
     """
     from scipy import ndimage
 
@@ -591,7 +591,7 @@ def get_living_room_shape_score(
             room_mask = floorplan == room_id
             labeled_array, num_features = ndimage.label(room_mask)
             if num_features > 1:
-                score -= 10.0  # Fragmented room - heavy penalty
+                score -= 30.0  # Fragmented room - critical penalty
                 continue  # Skip other checks for fragmented rooms
 
             # Convert grid cells to meters
@@ -600,17 +600,17 @@ def get_living_room_shape_score(
 
             # Penalty for narrow living rooms (width < 3m)
             if min_dim_meters < 3.0:
-                score -= 5.0  # Too narrow to furnish
+                score -= 20.0  # Too narrow to furnish - critical penalty
 
             # Aspect ratio scoring
             aspect_ratio = max(width, height) / min(width, height)
 
             if aspect_ratio <= 2.0:
-                score += 2.0  # Ideal rectangle (1:1 to 2:1)
+                score += 5.0  # Ideal rectangle (1:1 to 2:1)
             elif aspect_ratio <= 3.0:
                 pass  # Acceptable (2:1 to 3:1) - no change
             else:
-                score -= 3.0  # Too narrow (> 3:1)
+                score -= 15.0  # Too narrow (> 3:1) - critical penalty
 
     return score
 
@@ -664,12 +664,12 @@ def get_room_proportion_score(room_spec: RoomSpec, floorplan: np.ndarray) -> flo
     """Score based on room size relationships.
 
     Returns:
-        - Bonus if living room is the largest room (+3.0)
-        - Penalty if living room is NOT largest (-5.0)
-        - Penalty if hallway is larger than any bedroom (-5.0)
-        - Bonus if hallway is smaller than all bedrooms (+2.0)
-        - Bonus if kitchen+living is 40-50% of total area (+2.0)
-        - Penalty if kitchen+living is <30% or >60% of total area (-3.0)
+        - Bonus if living room is the largest room (+5.0)
+        - Penalty if living room is NOT largest (-25.0) - critical violation
+        - Penalty if hallway is larger than any bedroom (-20.0) - critical violation
+        - Bonus if hallway is smaller than all bedrooms (+5.0)
+        - Bonus if kitchen+living is 40-50% of total area (+3.0)
+        - Penalty if kitchen+living is <30% or >60% of total area (-15.0)
     """
     score = 0.0
 
@@ -705,9 +705,9 @@ def get_room_proportion_score(room_spec: RoomSpec, floorplan: np.ndarray) -> flo
     # Rule 1: LivingRoom should be the largest room
     if living_room_area > 0:
         if living_room_area >= max_room_size:
-            score += 3.0  # LivingRoom is largest → bonus
+            score += 5.0  # LivingRoom is largest → bonus
         else:
-            score -= 5.0  # LivingRoom is NOT largest → penalty
+            score -= 25.0  # LivingRoom is NOT largest → critical penalty
 
     # Rule 2: Hallway vs Bedroom comparison
     if hallway_areas and bedroom_areas:
@@ -715,18 +715,18 @@ def get_room_proportion_score(room_spec: RoomSpec, floorplan: np.ndarray) -> flo
         max_hallway_area = max(hallway_areas)
 
         if max_hallway_area > min_bedroom_area:
-            score -= 5.0  # Hallway larger than some bedroom → penalty
+            score -= 20.0  # Hallway larger than some bedroom → critical penalty
         else:
-            score += 2.0  # Hallway smaller than all bedrooms → bonus
+            score += 5.0  # Hallway smaller than all bedrooms → bonus
 
     # Rule 3: Kitchen + LivingRoom proportion of total house
     combined_area = kitchen_area + living_room_area
     if combined_area > 0:
         proportion = combined_area / total_area
         if 0.40 <= proportion <= 0.50:
-            score += 2.0  # Kitchen+LivingRoom is 40-50% → bonus
+            score += 3.0  # Kitchen+LivingRoom is 40-50% → bonus
         elif proportion < 0.30 or proportion > 0.60:
-            score -= 3.0  # Kitchen+LivingRoom is <30% or >60% → penalty
+            score -= 15.0  # Kitchen+LivingRoom is <30% or >60% → penalty
 
     return score
 
@@ -735,10 +735,12 @@ def get_adjacency_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     """Score based on room adjacency relationships.
 
     Returns:
-        - Bonus if kitchen is adjacent to living room (open plan)
-        - Bonus if living room is adjacent to hallway (circulation)
-        - Penalty if kitchen is adjacent to hallway (should go through living)
-        - Bonus if hallway is adjacent to at least one bedroom
+        - Bonus if kitchen is adjacent to living room (+5.0)
+        - Penalty if kitchen NOT adjacent to living room (-15.0)
+        - Penalty if kitchen is adjacent to hallway (-5.0)
+        - Bonus if living room is adjacent to hallway (+3.0)
+        - Bonus if hallway is adjacent to at least one bedroom (+2.0)
+        - Penalty if hallway NOT adjacent to any bedroom (-10.0)
     """
     score = 0.0
     adjacencies = get_room_adjacencies(floorplan)
@@ -759,32 +761,32 @@ def get_adjacency_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     for kitchen_id in kitchen_ids:
         kitchen_neighbors = adjacencies.get(kitchen_id, set())
         if kitchen_neighbors & living_ids:
-            # Kitchen adjacent to LivingRoom → +3.0 bonus (open plan)
-            score += 3.0
+            # Kitchen adjacent to LivingRoom → +5.0 bonus (open plan)
+            score += 5.0
         else:
-            # Kitchen NOT adjacent to LivingRoom → -5.0 penalty
-            score -= 5.0
+            # Kitchen NOT adjacent to LivingRoom → -15.0 penalty
+            score -= 15.0
 
-        # Kitchen adjacent to Hallway → -2.0 penalty (bad circulation)
+        # Kitchen adjacent to Hallway → -5.0 penalty (bad circulation)
         if kitchen_neighbors & hallway_ids:
-            score -= 2.0
+            score -= 5.0
 
     # LivingRoom <-> Hallway adjacency scoring
     for living_id in living_ids:
         living_neighbors = adjacencies.get(living_id, set())
         if living_neighbors & hallway_ids:
-            # LivingRoom adjacent to Hallway → +2.0 bonus
-            score += 2.0
+            # LivingRoom adjacent to Hallway → +3.0 bonus
+            score += 3.0
 
     # Hallway <-> Bedroom adjacency scoring
     for hallway_id in hallway_ids:
         hallway_neighbors = adjacencies.get(hallway_id, set())
         if hallway_neighbors & bedroom_ids:
-            # Hallway adjacent to at least 1 Bedroom → +1.0 bonus
-            score += 1.0
+            # Hallway adjacent to at least 1 Bedroom → +2.0 bonus
+            score += 2.0
         else:
-            # Hallway adjacent to 0 Bedrooms → -3.0 penalty
-            score -= 3.0
+            # Hallway adjacent to 0 Bedrooms → -10.0 penalty
+            score -= 10.0
 
     return score
 
