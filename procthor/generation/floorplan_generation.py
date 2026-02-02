@@ -791,6 +791,63 @@ def get_adjacency_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     return score
 
 
+def get_room_isolation_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Score floorplan based on room isolation (rooms that don't share walls).
+
+    For each room, count how many OTHER rooms it shares walls with:
+    - Isolated (0 neighbors): -50.0 penalty
+    - Dead-end (1 neighbor): -10.0 penalty
+    - Well-connected (3+ neighbors): +5.0 bonus
+
+    Special rules:
+    - Kitchen MUST share a wall with LivingRoom: -30.0 if not
+    - Hallway MUST share walls with at least 2 rooms: -30.0 if not
+
+    Returns:
+        Score adjustment for room isolation.
+    """
+    score = 0.0
+    adjacencies = get_room_adjacencies(floorplan)
+
+    # Build reverse lookup: room_type -> set of room_ids
+    type_to_ids = {}
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type not in type_to_ids:
+            type_to_ids[room_type] = set()
+        type_to_ids[room_type].add(room_id)
+
+    kitchen_ids = type_to_ids.get("Kitchen", set())
+    living_ids = type_to_ids.get("LivingRoom", set())
+    hallway_ids = type_to_ids.get("Hallway", set())
+
+    # Score each room based on connectivity
+    for room_id, room_type in room_spec.room_type_map.items():
+        neighbors = adjacencies.get(room_id, set())
+        num_neighbors = len(neighbors)
+
+        # General isolation penalties/bonuses
+        if num_neighbors == 0:
+            score -= 50.0  # Isolated room - severe penalty
+        elif num_neighbors == 1:
+            score -= 10.0  # Dead-end room - moderate penalty
+        elif num_neighbors >= 3:
+            score += 5.0  # Well-connected room - bonus
+
+    # Special rule: Kitchen MUST share a wall with LivingRoom
+    for kitchen_id in kitchen_ids:
+        kitchen_neighbors = adjacencies.get(kitchen_id, set())
+        if not (kitchen_neighbors & living_ids):
+            score -= 30.0  # Kitchen not adjacent to LivingRoom
+
+    # Special rule: Hallway MUST share walls with at least 2 rooms
+    for hallway_id in hallway_ids:
+        hallway_neighbors = adjacencies.get(hallway_id, set())
+        if len(hallway_neighbors) < 2:
+            score -= 30.0  # Hallway doesn't connect enough rooms
+
+    return score
+
+
 def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     """Calculate the quality of the floorplan based on the room specifications."""
     score = 0.0
@@ -815,6 +872,9 @@ def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
 
     # Room adjacency: reward good adjacencies (kitchen-living, hallway-bedroom)
     score += get_adjacency_score(room_spec, floorplan)
+
+    # Room isolation: penalize isolated rooms that don't share walls
+    score += get_room_isolation_score(room_spec, floorplan)
 
     return score
 
