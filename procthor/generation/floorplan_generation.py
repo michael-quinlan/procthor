@@ -731,6 +731,64 @@ def get_room_proportion_score(room_spec: RoomSpec, floorplan: np.ndarray) -> flo
     return score
 
 
+def get_adjacency_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Score based on room adjacency relationships.
+
+    Returns:
+        - Bonus if kitchen is adjacent to living room (open plan)
+        - Bonus if living room is adjacent to hallway (circulation)
+        - Penalty if kitchen is adjacent to hallway (should go through living)
+        - Bonus if hallway is adjacent to at least one bedroom
+    """
+    score = 0.0
+    adjacencies = get_room_adjacencies(floorplan)
+
+    # Build reverse lookup: room_type -> set of room_ids
+    type_to_ids = {}
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type not in type_to_ids:
+            type_to_ids[room_type] = set()
+        type_to_ids[room_type].add(room_id)
+
+    kitchen_ids = type_to_ids.get("Kitchen", set())
+    living_ids = type_to_ids.get("LivingRoom", set())
+    hallway_ids = type_to_ids.get("Hallway", set())
+    bedroom_ids = type_to_ids.get("Bedroom", set())
+
+    # Kitchen <-> LivingRoom adjacency scoring
+    for kitchen_id in kitchen_ids:
+        kitchen_neighbors = adjacencies.get(kitchen_id, set())
+        if kitchen_neighbors & living_ids:
+            # Kitchen adjacent to LivingRoom → +3.0 bonus (open plan)
+            score += 3.0
+        else:
+            # Kitchen NOT adjacent to LivingRoom → -5.0 penalty
+            score -= 5.0
+
+        # Kitchen adjacent to Hallway → -2.0 penalty (bad circulation)
+        if kitchen_neighbors & hallway_ids:
+            score -= 2.0
+
+    # LivingRoom <-> Hallway adjacency scoring
+    for living_id in living_ids:
+        living_neighbors = adjacencies.get(living_id, set())
+        if living_neighbors & hallway_ids:
+            # LivingRoom adjacent to Hallway → +2.0 bonus
+            score += 2.0
+
+    # Hallway <-> Bedroom adjacency scoring
+    for hallway_id in hallway_ids:
+        hallway_neighbors = adjacencies.get(hallway_id, set())
+        if hallway_neighbors & bedroom_ids:
+            # Hallway adjacent to at least 1 Bedroom → +1.0 bonus
+            score += 1.0
+        else:
+            # Hallway adjacent to 0 Bedrooms → -3.0 penalty
+            score -= 3.0
+
+    return score
+
+
 def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     """Calculate the quality of the floorplan based on the room specifications."""
     score = 0.0
@@ -752,6 +810,9 @@ def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
 
     # Living room shape: penalize narrow, fragmented, or oddly shaped living rooms
     score += get_living_room_shape_score(room_spec, floorplan)
+
+    # Room adjacency: reward good adjacencies (kitchen-living, hallway-bedroom)
+    score += get_adjacency_score(room_spec, floorplan)
 
     return score
 
