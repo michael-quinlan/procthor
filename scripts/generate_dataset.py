@@ -47,28 +47,33 @@ def generate_houses(
     houses = []
     failed_count = 0
 
-    for i in tqdm(range(num_houses), desc="Generating houses", unit="house"):
-        retries = 0
-        while retries < max_retries:
-            try:
-                house, _ = house_generator.sample()
-                house.validate(house_generator.controller)
+    try:
+        for i in tqdm(range(num_houses), desc="Generating houses", unit="house"):
+            retries = 0
+            while retries < max_retries:
+                try:
+                    house, _ = house_generator.sample()
+                    house.validate(house_generator.controller)
 
-                # Skip houses with warnings and retry
-                if house.data.get("metadata", {}).get("warnings"):
+                    # Skip houses with warnings and retry
+                    if house.data.get("metadata", {}).get("warnings"):
+                        retries += 1
+                        continue
+
+                    houses.append(house.data)
+                    break
+                except Exception as e:
                     retries += 1
-                    continue
+                    if retries >= max_retries:
+                        logger.warning(f"Failed to generate house {i} after {max_retries} retries: {e}")
+                        failed_count += 1
 
-                houses.append(house.data)
-                break
-            except Exception as e:
-                retries += 1
-                if retries >= max_retries:
-                    logger.warning(f"Failed to generate house {i} after {max_retries} retries: {e}")
-                    failed_count += 1
-
-    if failed_count > 0:
-        logger.warning(f"Failed to generate {failed_count} houses out of {num_houses} requested.")
+        if failed_count > 0:
+            logger.warning(f"Failed to generate {failed_count} houses out of {num_houses} requested.")
+    finally:
+        # Ensure the AI2THOR controller is properly cleaned up to avoid zombie windows
+        if house_generator.controller is not None:
+            house_generator.controller.stop()
 
     return houses
 

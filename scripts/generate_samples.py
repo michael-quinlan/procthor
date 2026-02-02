@@ -107,6 +107,7 @@ def main():
     for i, seed in enumerate(seeds):
         print(f"\nGenerating house {i + 1}/{num_houses} (seed={seed})...")
 
+        generator = None
         try:
             room_spec = HALLWAY_ROOM_SPEC_SAMPLER.sample()
             generator = HouseGenerator(split="train", seed=seed, room_spec=room_spec)
@@ -121,9 +122,13 @@ def main():
 
         except Exception as e:
             print(f"  Error: {e}")
-            axes[i].text(0.5, 0.5, f"Error:\n{str(e)[:50]}", 
+            axes[i].text(0.5, 0.5, f"Error:\n{str(e)[:50]}",
                         ha='center', va='center', transform=axes[i].transAxes)
             axes[i].set_title(f"House {i + 1} (Failed)")
+        finally:
+            # Ensure the AI2THOR controller is properly cleaned up to avoid zombie windows
+            if generator is not None and generator.controller is not None:
+                generator.controller.stop()
 
     plt.tight_layout()
     output_file = "floorplan.png"
