@@ -422,11 +422,136 @@ def get_ratio_overlap_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float
     return ratio_overlap
 
 
+def get_room_dimensions(room_id: int, floorplan: np.ndarray) -> tuple:
+    """Get the width and height of a room's bounding box.
+
+    Returns (width, height, area) of the room.
+    """
+    room_mask = floorplan == room_id
+    if not room_mask.any():
+        return (0, 0, 0)
+
+    rows = np.any(room_mask, axis=1)
+    cols = np.any(room_mask, axis=0)
+    row_min, row_max = np.where(rows)[0][[0, -1]]
+    col_min, col_max = np.where(cols)[0][[0, -1]]
+
+    width = col_max - col_min + 1
+    height = row_max - row_min + 1
+    area = room_mask.sum()
+
+    return (width, height, area)
+
+
+def get_room_adjacencies(floorplan: np.ndarray) -> dict:
+    """Get which rooms are adjacent to each other in the floorplan.
+
+    Returns dict mapping room_id -> set of adjacent room_ids.
+    """
+    adjacencies = {}
+    rows, cols = floorplan.shape
+
+    for room_id in np.unique(floorplan):
+        if room_id in {EMPTY_ROOM_ID, OUTDOOR_ROOM_ID}:
+            continue
+        adjacencies[room_id] = set()
+
+        room_mask = floorplan == room_id
+        # Check all 4 directions for adjacency
+        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            for r in range(rows):
+                for c in range(cols):
+                    if room_mask[r, c]:
+                        nr, nc = r + dy, c + dx
+                        if 0 <= nr < rows and 0 <= nc < cols:
+                            neighbor = floorplan[nr, nc]
+                            if neighbor != room_id and neighbor not in {EMPTY_ROOM_ID, OUTDOOR_ROOM_ID}:
+                                adjacencies[room_id].add(neighbor)
+
+    return adjacencies
+
+
+def get_hallway_shape_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Score hallways based on their shape - prefer elongated hallways.
+
+    Returns:
+        - Bonus if hallway has aspect ratio > 2 (elongated)
+        - Penalty if hallway is too square (aspect ratio < 1.5)
+    """
+    score = 0.0
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type == "Hallway":
+            width, height, area = get_room_dimensions(room_id, floorplan)
+            if width == 0 or height == 0:
+                continue
+
+            # Aspect ratio: how elongated is the hallway?
+            aspect_ratio = max(width, height) / min(width, height)
+
+            # Hallways should have aspect ratio >= 2 (at least 2x longer than wide)
+            if aspect_ratio >= 2.0:
+                score += 2.0  # Good, elongated hallway
+            elif aspect_ratio >= 1.5:
+                score += 0.5  # Acceptable
+            else:
+                score -= 3.0  # Too square, penalty
+
+            # Penalty if hallway takes up too much space
+            total_area = (floorplan != OUTDOOR_ROOM_ID).sum()
+            hallway_ratio = area / total_area
+            if hallway_ratio > 0.15:  # Hallway is more than 15% of house
+                score -= 2.0
+
+    return score
+
+
+def get_hallway_connectivity_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Score hallways based on their connectivity.
+
+    Returns:
+        - Bonus if hallway connects to multiple rooms
+        - Penalty if hallway is isolated (connects to 0 or 1 room)
+    """
+    score = 0.0
+    adjacencies = get_room_adjacencies(floorplan)
+
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type == "Hallway":
+            adjacent_ids = adjacencies.get(room_id, set())
+            num_connections = len(adjacent_ids)
+
+            # Hallway should connect multiple rooms
+            if num_connections == 0:
+                score -= 10.0  # Isolated hallway - heavy penalty
+            elif num_connections == 1:
+                score -= 5.0  # Dead-end hallway - moderate penalty
+            elif num_connections == 2:
+                score += 1.0  # Connects two rooms - acceptable
+            else:
+                score += 2.0 + (num_connections - 2) * 0.5  # Multiple connections - bonus
+
+            # Extra bonus if hallway connects to LivingRoom
+            adjacent_types = {room_spec.room_type_map.get(adj_id) for adj_id in adjacent_ids}
+            if "LivingRoom" in adjacent_types:
+                score += 2.0
+
+    return score
+
+
 def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     """Calculate the quality of the floorplan based on the room specifications."""
-    # TODO: Consider ranking by adjacency constraints, maybe hallway connections.
-    ratio_overlap_score = get_ratio_overlap_score(room_spec, floorplan)
-    return ratio_overlap_score
+    score = 0.0
+
+    # Base score: how well do room sizes match the spec?
+    score += get_ratio_overlap_score(room_spec, floorplan)
+
+    # Hallway shape: prefer elongated hallways (aspect ratio > 2)
+    score += get_hallway_shape_score(room_spec, floorplan)
+
+    # Hallway connectivity: prefer hallways that connect multiple rooms
+    score += get_hallway_connectivity_score(room_spec, floorplan)
+
+    return score
 
 
 def recursively_expand_rooms(
