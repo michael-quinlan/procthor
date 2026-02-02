@@ -715,6 +715,69 @@ class ProceduralDoor(ProceduralFrame):
         return door
 
 
+def check_door_spacing_feasibility(
+    boundary_groups: BoundaryGroups,
+    room_type_map: Dict[int, str],
+) -> bool:
+    """Check if doors can be placed with full padding without intersections.
+
+    This is a lightweight check that estimates whether the floorplan geometry
+    will allow doors to be placed with the preferred padding values. It checks
+    for potential door spacing issues by looking at shared corner situations.
+
+    Args:
+        boundary_groups: Mapping of (room_id_1, room_id_2) to wall segments.
+        room_type_map: Mapping from room_id to room_type.
+
+    Returns:
+        True if doors can likely be placed with full padding.
+        False if padding reduction would likely be needed (tight spacing).
+    """
+    # Calculate the minimum required space for a door with full padding
+    # Door needs: entrance_padding (behind) + door_open_size + in_front_padding
+    min_door_clearance = PREFERRED_ENTRANCE_PADDING + PADDING_IN_FRONT_OF_DOOR
+
+    # Find rooms that share multiple boundaries (potential corner conflicts)
+    room_boundary_count: Dict[int, int] = defaultdict(int)
+    for (room_id_1, room_id_2) in boundary_groups.keys():
+        if room_id_1 != OUTDOOR_ROOM_ID:
+            room_boundary_count[room_id_1] += 1
+        if room_id_2 != OUTDOOR_ROOM_ID:
+            room_boundary_count[room_id_2] += 1
+
+    # Check for small wall segments that can't fit doors with padding
+    for (room_id_1, room_id_2), walls in boundary_groups.items():
+        if room_id_1 == OUTDOOR_ROOM_ID or room_id_2 == OUTDOOR_ROOM_ID:
+            continue
+
+        for wall in walls:
+            # Wall is defined as ((x1, z1), (x2, z2))
+            wall_length = abs(wall[1][0] - wall[0][0]) + abs(wall[1][1] - wall[0][1])
+
+            # If wall is too short for a door with padding, this could cause issues
+            # when multiple doors need to be placed near corners
+            if wall_length < min_door_clearance * 2:
+                # Check if either room has many boundaries (likely corner situation)
+                if room_boundary_count[room_id_1] >= 3 or room_boundary_count[room_id_2] >= 3:
+                    return False
+
+    # Check for potential corner conflicts
+    # Find rooms that share boundaries with the same third room
+    room_to_neighbors: Dict[int, Set[int]] = defaultdict(set)
+    for (room_id_1, room_id_2) in boundary_groups.keys():
+        if room_id_1 != OUTDOOR_ROOM_ID and room_id_2 != OUTDOOR_ROOM_ID:
+            room_to_neighbors[room_id_1].add(room_id_2)
+            room_to_neighbors[room_id_2].add(room_id_1)
+
+    # Rooms with 4+ neighbors often have corner door conflicts
+    for room_id, neighbors in room_to_neighbors.items():
+        if len(neighbors) >= 4:
+            # High likelihood of door spacing issues
+            return False
+
+    return True
+
+
 def fix_door_intersections(doors: List[ProceduralDoor]):
     """Try flipping doors until none of them intersect."""
     # Try with some padding first, so there's space to walk between rooms!
