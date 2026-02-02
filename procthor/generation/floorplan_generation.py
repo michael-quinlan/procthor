@@ -252,7 +252,23 @@ def grow_l_shape(room, floorplan):
         example. The final phase scans the grid for remaining empty space; this
         space is directly assigned to the room which fills most of the adjacent
         area.
+
+    NOTE: We add a maximum size constraint to prevent rooms from growing
+    excessively large during L-shape expansion. This allows 2x the grow_rect
+    limit to provide flexibility for filling gaps while maintaining proportions.
     """
+    # NOTE: check if room is already grown beyond the maximum size for L-shape.
+    # Allow L-shape growth up to 2x the rect max (some flexibility for filling gaps)
+    maximum_size = room.ratio * 8  # 2x the grow_rect limit of ratio * 4
+    current_size = sum(
+        1
+        for y in range(room.min_y, room.max_y)
+        for x in range(room.min_x, room.max_x)
+        if floorplan[y, x] == room.room_id
+    )
+    if current_size > maximum_size:
+        return False
+
     # NOTE: Find out how much the rectangle can grow in each direction.
     growth_sizes = {
         "right": (
@@ -419,7 +435,7 @@ def get_ratio_overlap_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float
         [min(actual_ratios[room_id], ideal_ratios[room_id]) for room_id in ideal_ratios]
     )
 
-    return ratio_overlap
+    return ratio_overlap * 100.0
 
 
 def get_room_dimensions(room_id: int, floorplan: np.ndarray) -> tuple:
