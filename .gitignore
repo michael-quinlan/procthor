@@ -134,3 +134,8 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Hallway generation outputs
+*.png
+*.json.gz
+temp.json
