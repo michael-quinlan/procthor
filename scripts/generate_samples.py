@@ -25,9 +25,15 @@ ROOM_TYPE_TO_COLOR = {
     "Hallway": "#d9d9d9",
 }
 
+# Conversion constant
+SQM_TO_SQFT = 10.7639
+
 
 def plot_house(house, ax, title):
-    """Plot a single house floorplan with doors."""
+    """Plot a single house floorplan with doors and square footage."""
+    total_sqft = 0.0
+    room_areas = []  # Store for legend
+    
     # Draw rooms
     for room_id, room in house.rooms.items():
         poly = room.room_polygon.polygon.exterior.coords
@@ -37,9 +43,17 @@ def plot_house(house, ax, title):
         ax.fill(xs, zs, color)
         ax.plot(xs, zs, "#000000", linewidth=2)
 
+        # Calculate room area (polygon.area gives sqm, convert to sqft)
+        area_sqm = room.room_polygon.polygon.area
+        area_sqft = area_sqm * SQM_TO_SQFT
+        total_sqft += area_sqft
+        room_areas.append((room.room_type, room_id, area_sqft))
+
         centroid = room.room_polygon.polygon.centroid
-        ax.text(centroid.x, centroid.y, f"{room.room_type}\n({room_id})",
-                ha='center', va='center', fontsize=7, fontweight='bold')
+        # Show room type, ID, and sqft
+        ax.text(centroid.x, centroid.y, 
+                f"{room.room_type}\n({room_id})\n{area_sqft:.0f} sqft",
+                ha='center', va='center', fontsize=6, fontweight='bold')
 
     # Draw doors on top of walls
     if "doors" in house.data and house.data["doors"]:
@@ -73,7 +87,8 @@ def plot_house(house, ax, title):
                     pass
 
     ax.set_aspect('equal')
-    ax.set_title(title, fontsize=10)
+    # Include total sqft in title
+    ax.set_title(f"{title}\nTotal: {total_sqft:.0f} sqft", fontsize=9)
     ax.set_xlabel('X (m)')
     ax.set_ylabel('Z (m)')
 
@@ -84,7 +99,7 @@ def main():
 
     # Generate 4 houses with different seeds
     num_houses = 4
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
     axes = axes.flatten()
 
     seeds = [42, 123, 456, 789]
