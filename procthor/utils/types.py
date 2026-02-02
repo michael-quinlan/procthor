@@ -9,6 +9,11 @@ Split = Literal["train", "val", "test"]
 XZPoly = List[Tuple[Tuple[float, float], Tuple[float, float]]]
 BoundaryGroups = Dict[Tuple[int, int], List[Tuple[float, float]]]
 
+# Room type constants
+PUBLIC_ROOM_TYPES = frozenset({"Kitchen", "LivingRoom", "Hallway"})
+PRIVATE_ROOM_TYPES = frozenset({"Bedroom", "Bathroom"})
+VALID_ROOM_TYPES = PUBLIC_ROOM_TYPES | PRIVATE_ROOM_TYPES
+
 
 class InvalidFloorplan(Exception):
     pass
@@ -228,7 +233,7 @@ class LeafRoom:
         self,
         room_id: int,
         ratio: int,
-        room_type: Optional[Literal["Kitchen", "LivingRoom", "Bedroom", "Bathroom"]],
+        room_type: Optional[Literal["Kitchen", "LivingRoom", "Bedroom", "Bathroom", "Hallway"]],
         avoid_doors_from_metarooms: bool = False,
     ):
         """
@@ -236,7 +241,7 @@ class LeafRoom:
         - avoid_doors_from_metarooms: prioritize having only 1 door, if possible.
           For example, bathrooms often only have 1 door.
         """
-        assert room_type in {"Kitchen", "LivingRoom", "Bedroom", "Bathroom", None}
+        assert room_type is None or room_type in VALID_ROOM_TYPES
         if room_id in {0, OUTDOOR_ROOM_ID}:
             raise Exception(f"room_id of 0 and {OUTDOOR_ROOM_ID} are reserved!")
 
