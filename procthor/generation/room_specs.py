@@ -24,7 +24,7 @@ class RoomSpec:
     """
 
     room_type_map: Dict[
-        int, Literal["Bedroom", "Bathroom", "Kitchen", "LivingRoom"]
+        int, Literal["Bedroom", "Bathroom", "Kitchen", "LivingRoom", "Hallway"]
     ] = field(init=False)
     room_map: Dict[int, Union[LeafRoom, MetaRoom]] = field(init=False)
 
