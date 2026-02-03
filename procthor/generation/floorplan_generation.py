@@ -963,13 +963,10 @@ def validate_room_proportions(room_spec: RoomSpec, floorplan: np.ndarray) -> boo
 
 
 def validate_bedroom_accessibility(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
-    """Validate that ALL bedrooms can access Hallway or LivingRoom.
-
-    A bedroom is accessible if:
-    1. It directly touches Hallway or LivingRoom, OR
-    2. It touches a Bathroom that touches Hallway/LivingRoom (master suite pattern)
+    """Validate that ALL bedrooms share a wall with Hallway or LivingRoom.
 
     Returns False (rejects the candidate) if any bedroom is inaccessible.
+    Bedrooms must be able to get doors to Hallway or LivingRoom.
     """
     adjacencies = get_room_adjacencies(floorplan)
 
@@ -979,29 +976,14 @@ def validate_bedroom_accessibility(room_spec: RoomSpec, floorplan: np.ndarray) -
         type_to_ids.setdefault(room_type, set()).add(room_id)
 
     bedroom_ids = type_to_ids.get("Bedroom", set())
-    bathroom_ids = type_to_ids.get("Bathroom", set())
     hallway_ids = type_to_ids.get("Hallway", set())
     living_ids = type_to_ids.get("LivingRoom", set())
-    public_rooms = hallway_ids | living_ids
+    accessible_types = hallway_ids | living_ids
 
     for bedroom_id in bedroom_ids:
         adjacent = adjacencies.get(bedroom_id, set())
-
-        # Direct access to public room?
-        if any(adj in public_rooms for adj in adjacent):
-            continue  # This bedroom is accessible
-
-        # Access via bathroom (master suite pattern)?
-        adjacent_bathrooms = adjacent & bathroom_ids
-        accessible_via_bath = False
-        for bath_id in adjacent_bathrooms:
-            bath_adjacent = adjacencies.get(bath_id, set())
-            if any(adj in public_rooms for adj in bath_adjacent):
-                accessible_via_bath = True
-                break
-
-        if not accessible_via_bath:
-            return False  # No direct or indirect access
+        if not any(adj in accessible_types for adj in adjacent):
+            return False  # This bedroom is inaccessible - REJECT
 
     return True  # All bedrooms are accessible
 
