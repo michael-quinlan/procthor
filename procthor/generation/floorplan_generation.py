@@ -864,6 +864,42 @@ def get_room_isolation_score(room_spec: RoomSpec, floorplan: np.ndarray) -> floa
     return score
 
 
+def get_bedroom_accessibility_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Score how well bedrooms can access Hallway/LivingRoom.
+
+    Bedrooms must share a wall with Hallway or LivingRoom to get doors.
+    Bedrooms that only touch other bedrooms/bathrooms are inaccessible.
+
+    Returns:
+        score: -30.0 per inaccessible bedroom, +5.0 per accessible bedroom
+    """
+    score = 0.0
+    adjacencies = get_room_adjacencies(floorplan)
+
+    # Build reverse lookup: room_type -> set of room_ids
+    type_to_ids = {}
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type not in type_to_ids:
+            type_to_ids[room_type] = set()
+        type_to_ids[room_type].add(room_id)
+
+    bedroom_ids = type_to_ids.get("Bedroom", set())
+    hallway_ids = type_to_ids.get("Hallway", set())
+    living_ids = type_to_ids.get("LivingRoom", set())
+
+    accessible_types = hallway_ids | living_ids
+
+    for bedroom_id in bedroom_ids:
+        # Check if bedroom shares a wall with Hallway or LivingRoom
+        adjacent = adjacencies.get(bedroom_id, set())
+        if any(adj in accessible_types for adj in adjacent):
+            score += 5.0  # Bonus for accessible bedroom
+        else:
+            score -= 30.0  # Heavy penalty for inaccessible bedroom
+
+    return score
+
+
 def validate_room_proportions(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
     """Validate that room proportions are reasonable.
 
@@ -943,6 +979,9 @@ def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
 
     # Room isolation: penalize isolated rooms that don't share walls
     score += get_room_isolation_score(room_spec, floorplan)
+
+    # Bedroom accessibility: penalize bedrooms that can't access Hallway/LivingRoom
+    score += get_bedroom_accessibility_score(room_spec, floorplan)
 
     return score
 
