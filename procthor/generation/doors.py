@@ -231,6 +231,12 @@ def default_add_doors(
             if room1_type == "Bedroom" and room2_type == "Bedroom":
                 continue
 
+            # RULE: Never add doors between Bedroom and Kitchen
+            if (room1_type == "Bedroom" and room2_type == "Kitchen") or (
+                room1_type == "Kitchen" and room2_type == "Bedroom"
+            ):
+                continue
+
             # RULE: Bathrooms only get one door
             if room1_type == "Bathroom" and opening[0] in bathrooms_with_doors:
                 continue
