@@ -952,6 +952,32 @@ def validate_room_proportions(room_spec: RoomSpec, floorplan: np.ndarray) -> boo
     return True  # Candidate passes validation
 
 
+def validate_bedroom_accessibility(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
+    """Validate that ALL bedrooms share a wall with Hallway or LivingRoom.
+
+    Returns False (rejects the candidate) if any bedroom is inaccessible.
+    Bedrooms must be able to get doors to Hallway or LivingRoom.
+    """
+    adjacencies = get_room_adjacencies(floorplan)
+
+    # Build reverse lookup: room_type -> set of room_ids
+    type_to_ids = {}
+    for room_id, room_type in room_spec.room_type_map.items():
+        type_to_ids.setdefault(room_type, set()).add(room_id)
+
+    bedroom_ids = type_to_ids.get("Bedroom", set())
+    hallway_ids = type_to_ids.get("Hallway", set())
+    living_ids = type_to_ids.get("LivingRoom", set())
+    accessible_types = hallway_ids | living_ids
+
+    for bedroom_id in bedroom_ids:
+        adjacent = adjacencies.get(bedroom_id, set())
+        if not any(adj in accessible_types for adj in adjacent):
+            return False  # This bedroom is inaccessible - REJECT
+
+    return True  # All bedrooms are accessible
+
+
 def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     """Calculate the quality of the floorplan based on the room specifications."""
     score = 0.0
@@ -1029,6 +1055,10 @@ def generate_floorplan(
 
         # Hard rejection for bad room proportions
         if not validate_room_proportions(room_spec=room_spec, floorplan=floorplan):
+            continue
+
+        # Hard rejection for inaccessible bedrooms
+        if not validate_bedroom_accessibility(room_spec=room_spec, floorplan=floorplan):
             continue
 
         score = score_floorplan(room_spec=room_spec, floorplan=floorplan)
