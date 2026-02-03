@@ -783,19 +783,19 @@ def get_adjacency_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     hallway_ids = type_to_ids.get("Hallway", set())
     bedroom_ids = type_to_ids.get("Bedroom", set())
 
-    # Kitchen <-> LivingRoom adjacency scoring
+    # Kitchen <-> LivingRoom/Hallway adjacency scoring
+    # Kitchen must connect to LivingRoom directly OR via Hallway (which must connect to LivingRoom per Task 44)
     for kitchen_id in kitchen_ids:
         kitchen_neighbors = adjacencies.get(kitchen_id, set())
         if kitchen_neighbors & living_ids:
-            # Kitchen adjacent to LivingRoom → +5.0 bonus (open plan)
+            # Kitchen adjacent to LivingRoom → +5.0 bonus (open plan, best case)
             score += 5.0
+        elif kitchen_neighbors & hallway_ids:
+            # Kitchen adjacent to Hallway (but not LivingRoom) → +2.0 (acceptable path via Hallway)
+            score += 2.0
         else:
-            # Kitchen NOT adjacent to LivingRoom → -15.0 penalty
+            # Kitchen adjacent to neither LivingRoom nor Hallway → -15.0 penalty
             score -= 15.0
-
-        # Kitchen adjacent to Hallway → -5.0 penalty (bad circulation)
-        if kitchen_neighbors & hallway_ids:
-            score -= 5.0
 
     # LivingRoom <-> Hallway adjacency scoring
     for living_id in living_ids:
@@ -859,11 +859,12 @@ def get_room_isolation_score(room_spec: RoomSpec, floorplan: np.ndarray) -> floa
         elif num_neighbors >= 3:
             score += 5.0  # Well-connected room - bonus
 
-    # Special rule: Kitchen MUST share a wall with LivingRoom
+    # Special rule: Kitchen MUST share a wall with LivingRoom OR Hallway
+    # (Hallway is acceptable since it must connect to LivingRoom per Task 44)
     for kitchen_id in kitchen_ids:
         kitchen_neighbors = adjacencies.get(kitchen_id, set())
-        if not (kitchen_neighbors & living_ids):
-            score -= 30.0  # Kitchen not adjacent to LivingRoom
+        if not (kitchen_neighbors & living_ids) and not (kitchen_neighbors & hallway_ids):
+            score -= 30.0  # Kitchen not adjacent to LivingRoom or Hallway
 
     # Special rule: Hallway MUST share walls with at least 2 rooms
     for hallway_id in hallway_ids:
