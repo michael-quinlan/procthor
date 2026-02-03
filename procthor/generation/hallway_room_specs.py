@@ -76,10 +76,11 @@ def create_hallway_room_spec(
     )
     room_id += 1
 
-    # Private rooms: Bedrooms and bathrooms
+    # Private rooms: Hallway + Bedrooms + Bathrooms
+    # Hallway is inside private_zone as central circulation
     # For 2+ bathrooms, create a master suite (master bedroom + master bath)
-    private_rooms = []
-    private_zone_ratio = 0
+    private_rooms = [hallway]  # Hallway is first child of private_zone
+    private_zone_ratio = RATIOS["Hallway"]
 
     if num_bathrooms >= 2:
         # Master suite: master bedroom + master bath nested together
@@ -151,9 +152,9 @@ def create_hallway_room_spec(
 
     private_zone = MetaRoom(ratio=private_zone_ratio, children=private_rooms)
 
-    # Combine: Hallway connects public and private zones
-    total_ratio = public_zone_ratio + RATIOS["Hallway"] + private_zone_ratio
-    house = MetaRoom(ratio=total_ratio, children=[public_zone, hallway, private_zone])
+    # Combine: Private zone now contains hallway as central circulation
+    total_ratio = public_zone_ratio + private_zone_ratio
+    house = MetaRoom(ratio=total_ratio, children=[public_zone, private_zone])
 
     # Auto-calculate dims if not provided
     if dims is None:
