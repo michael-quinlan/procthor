@@ -33,6 +33,51 @@ ROOM_TYPE_TO_COLOR = {
 SQM_TO_SQFT = 10.7639
 
 
+def validate_final_proportions(house) -> tuple:
+    """Validate that final room polygon proportions are sensible.
+    
+    Returns:
+        Tuple of (passed, reason) where reason explains failure if passed=False.
+    """
+    # Small tolerance for floating point comparisons (0.1 m² = ~1 sqft)
+    EPSILON = 0.1
+    
+    room_areas = {}
+    for room_id, room in house.rooms.items():
+        room_type = room.room_type
+        area = room.room_polygon.polygon.area
+        if room_type not in room_areas:
+            room_areas[room_type] = []
+        room_areas[room_type].append(area)
+    
+    living_areas = room_areas.get('LivingRoom', [])
+    bedroom_areas = room_areas.get('Bedroom', [])
+    hallway_areas = room_areas.get('Hallway', [])
+    
+    if not living_areas:
+        return True, ""  # No living room to validate
+    
+    max_living = max(living_areas)
+    max_bedroom = max(bedroom_areas) if bedroom_areas else 0
+    min_bedroom = min(bedroom_areas) if bedroom_areas else float('inf')
+    max_hallway = max(hallway_areas) if hallway_areas else 0
+    
+    # Rule 1: LivingRoom >= any Bedroom (with epsilon tolerance)
+    if max_bedroom > 0 and max_living < max_bedroom - EPSILON:
+        return False, f"Living ({max_living:.1f}m²) < Bedroom ({max_bedroom:.1f}m²)"
+    
+    # Rule 2: Hallway <= any Bedroom (with epsilon tolerance)
+    if max_hallway > 0 and min_bedroom < float('inf') and max_hallway > min_bedroom + EPSILON:
+        return False, f"Hallway ({max_hallway:.1f}m²) > Bedroom ({min_bedroom:.1f}m²)"
+    
+    # Rule 3: LivingRoom >= Hallway (with epsilon tolerance)
+    if max_hallway > 0 and max_living < max_hallway - EPSILON:
+        return False, f"Living ({max_living:.1f}m²) < Hallway ({max_hallway:.1f}m²)"
+    
+    return True, ""
+
+
+
 def plot_house(house, ax, title):
     """Plot a single house floorplan with doors and square footage."""
     total_sqft = 0.0
@@ -164,6 +209,13 @@ def generate_houses(
                         retries += 1
                         continue
 
+                    # Validate final room proportions (after all processing)
+                    passed, reason = validate_final_proportions(house)
+                    if not passed:
+                        logger.debug(f"House {i} failed proportion check: {reason}")
+                        retries += 1
+                        continue
+
                     houses.append(house.data)
                     house_count += 1
 
@@ -238,7 +290,7 @@ def main() -> int:
     parser.add_argument(
         "--max-retries",
         type=int,
-        default=3,
+        default=10,
         help="Maximum retries per house on generation failure.",
     )
     parser.add_argument(
