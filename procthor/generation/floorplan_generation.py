@@ -988,6 +988,38 @@ def validate_bedroom_accessibility(room_spec: RoomSpec, floorplan: np.ndarray) -
     return True  # All bedrooms are accessible
 
 
+def validate_hallway_public_access(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
+    """Validate that hallway shares a wall with LivingRoom or Kitchen.
+
+    Returns False (rejects the candidate) if hallway doesn't connect to
+    any public room (LivingRoom or Kitchen). This ensures hallways serve
+    their purpose as circulation space connecting public and private areas.
+    """
+    adjacencies = get_room_adjacencies(floorplan)
+
+    # Build reverse lookup: room_type -> set of room_ids
+    type_to_ids = {}
+    for room_id, room_type in room_spec.room_type_map.items():
+        type_to_ids.setdefault(room_type, set()).add(room_id)
+
+    hallway_ids = type_to_ids.get("Hallway", set())
+    living_ids = type_to_ids.get("LivingRoom", set())
+    kitchen_ids = type_to_ids.get("Kitchen", set())
+    public_room_ids = living_ids | kitchen_ids
+
+    # If there's no hallway, nothing to validate
+    if not hallway_ids:
+        return True
+
+    # Check if any hallway connects to a public room
+    for hallway_id in hallway_ids:
+        adjacent = adjacencies.get(hallway_id, set())
+        if any(adj in public_room_ids for adj in adjacent):
+            return True  # At least one hallway connects to public room
+
+    return False  # No hallway connects to any public room - REJECT
+
+
 def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     """Calculate the quality of the floorplan based on the room specifications."""
     score = 0.0
@@ -1069,6 +1101,10 @@ def generate_floorplan(
 
         # Hard rejection for inaccessible bedrooms
         if not validate_bedroom_accessibility(room_spec=room_spec, floorplan=floorplan):
+            continue
+
+        # Hard rejection for hallway not connected to public rooms
+        if not validate_hallway_public_access(room_spec=room_spec, floorplan=floorplan):
             continue
 
         score = score_floorplan(room_spec=room_spec, floorplan=floorplan)
