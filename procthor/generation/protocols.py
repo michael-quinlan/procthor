@@ -19,6 +19,7 @@ class SampleHouseStructureProtocol(Protocol):
         room_ids: Set,
         room_spec: "RoomSpec",
         interior_boundary_scale: float,
+        use_progressive: bool = False,
     ) -> "HouseStructure":
         pass
 

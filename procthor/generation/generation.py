@@ -15,6 +15,7 @@ from procthor.utils.types import (
 )
 from .ceiling_height import sample_ceiling_height
 from .floorplan_generation import generate_floorplan
+from .progressive_floorplan_generation import generate_floorplan_progressive
 from .house import HouseStructure, PartialHouse
 from .interior_boundaries import sample_interior_boundary, DEFAULT_AVERAGE_ROOM_SIZE
 from .room_specs import RoomSpec
@@ -188,6 +189,7 @@ def default_sample_house_structure(
     room_spec: "RoomSpec",
     interior_boundary_scale: float,
     average_room_size: int = DEFAULT_AVERAGE_ROOM_SIZE,
+    use_progressive: bool = False,
 ) -> HouseStructure:
     if interior_boundary is None:
         interior_boundary = sample_interior_boundary(
@@ -195,9 +197,14 @@ def default_sample_house_structure(
             average_room_size=average_room_size,
             dims=None if room_spec.dims is None else room_spec.dims(),
         )
-    floorplan = generate_floorplan(
-        room_spec=room_spec, interior_boundary=interior_boundary
-    )
+    if use_progressive:
+        floorplan = generate_floorplan_progressive(
+            room_spec=room_spec, interior_boundary=interior_boundary
+        )
+    else:
+        floorplan = generate_floorplan(
+            room_spec=room_spec, interior_boundary=interior_boundary
+        )
 
     # NOTE: Pad the floorplan with the outdoor room id to make
     # it easier to find walls.

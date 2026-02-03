@@ -168,6 +168,7 @@ def generate_houses(
     max_retries: int = 3,
     save_images: bool = False,
     image_dir: str = "./images/",
+    use_progressive: bool = False,
 ) -> List[Dict]:
     """Generate a list of house data dictionaries.
 
@@ -178,6 +179,7 @@ def generate_houses(
         max_retries: Maximum retries per house on failure.
         save_images: If True, save a PNG floorplan for each house.
         image_dir: Directory to save images (if save_images is True).
+        use_progressive: If True, use progressive floorplan generation algorithm.
 
     Returns:
         List of house data dictionaries.
@@ -186,6 +188,7 @@ def generate_houses(
         split=split,
         seed=seed,
         room_spec_sampler=HALLWAY_ROOM_SPEC_SAMPLER,
+        use_progressive=use_progressive,
     )
 
     # Create image directory if needed
@@ -312,12 +315,19 @@ def main() -> int:
         default="./images/",
         help="Directory to save images (only used with --save-images).",
     )
+    parser.add_argument(
+        "--progressive",
+        action="store_true",
+        help="Use progressive floorplan generation algorithm.",
+    )
 
     args = parser.parse_args()
 
     logger.info(f"Generating {args.num_houses} houses (split={args.split}, seed={args.seed})")
     if args.save_images:
         logger.info(f"Saving images to {args.image_dir}")
+    if args.progressive:
+        logger.info("Using progressive floorplan generation algorithm")
 
     houses = generate_houses(
         num_houses=args.num_houses,
@@ -326,6 +336,7 @@ def main() -> int:
         max_retries=args.max_retries,
         save_images=args.save_images,
         image_dir=args.image_dir,
+        use_progressive=args.progressive,
     )
 
     if not houses:

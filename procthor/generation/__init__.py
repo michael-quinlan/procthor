@@ -98,6 +98,7 @@ class HouseGenerator:
     controller: Optional[Controller] = None
     partial_house: Optional[PartialHouse] = None
     pt_db: ProcTHORDatabase = DEFAULT_PROCTHOR_DATABASE
+    use_progressive: bool = False
     generation_functions: GenerationFunctions = Factory(
         _create_default_generation_functions
     )
@@ -169,6 +170,7 @@ class HouseGenerator:
                         room_ids=room_ids,
                         room_spec=room_spec,
                         interior_boundary_scale=sampling_vars.interior_boundary_scale,
+                        use_progressive=self.use_progressive,
                     )
                     # Validate room proportions (polygon areas)
                     validate_polygon_proportions(
