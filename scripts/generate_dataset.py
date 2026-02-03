@@ -198,9 +198,17 @@ def generate_houses(
 
     try:
         for i in tqdm(range(num_houses), desc="Generating houses", unit="house"):
+            # Sample spec ONCE per house slot to avoid bias toward smaller houses
+            # (larger houses fail more often, and without this fix each retry
+            # would sample a new spec, biasing toward specs that succeed quickly)
+            target_spec = HALLWAY_ROOM_SPEC_SAMPLER.sample()
+            house_generator.room_spec = target_spec
+
             retries = 0
             while retries < max_retries:
                 try:
+                    # Reset partial_house before each attempt to ensure fresh generation
+                    house_generator.partial_house = None
                     house, _ = house_generator.sample()
                     house.validate(house_generator.controller)
 
