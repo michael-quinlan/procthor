@@ -122,6 +122,16 @@ def sample_initial_room_positions(
         # add the grid cell to the floorplan
         floorplan[cell_y, cell_x] = room.room_id
 
+        # Boost weights near Hallway/LivingRoom to attract bedrooms
+        if room.room_type in ("Hallway", "LivingRoom"):
+            # Boost weights in a 3-cell radius (but don't overwrite zeros)
+            for dy in range(-3, 4):
+                for dx in range(-3, 4):
+                    ny, nx = cell_y + dy, cell_x + dx
+                    if 0 <= ny < grid_weights.shape[0] and 0 <= nx < grid_weights.shape[1]:
+                        if grid_weights[ny, nx] > 0:
+                            grid_weights[ny, nx] += 5  # Boost weight
+
         # update the weights
         grid_weights[
             max(0, cell_y - 1) : min(grid_weights.shape[0], cell_y + 2),
@@ -1030,7 +1040,7 @@ def recursively_expand_rooms(
 def generate_floorplan(
     room_spec: np.ndarray,
     interior_boundary: np.ndarray,
-    candidate_generations: int = 100,
+    candidate_generations: int = 500,
 ) -> np.ndarray:
     """Generate a floorplan for the given room spec and interior boundary.
 
