@@ -187,3 +187,10 @@ HALLWAY_SPECS = [
 # Sampler for hallway-based room specs
 HALLWAY_ROOM_SPEC_SAMPLER = RoomSpecSampler(HALLWAY_SPECS)
 
+# Dictionary for easy access by spec name
+HALLWAY_ROOM_SPECS = {
+    "2br-1ba": lambda: create_hallway_room_spec("2br-1ba", num_bedrooms=2, num_bathrooms=1),
+    "3br-2ba": lambda: create_hallway_room_spec("3br-2ba", num_bedrooms=3, num_bathrooms=2),
+    "4br-2ba": lambda: create_hallway_room_spec("4br-2ba", num_bedrooms=4, num_bathrooms=2),
+}
+

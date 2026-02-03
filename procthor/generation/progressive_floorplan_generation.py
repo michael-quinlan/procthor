@@ -86,7 +86,7 @@ def place_room(
     floorplan: np.ndarray,
     adjacent_to: Optional[List[str]] = None,
     room_type_map: Optional[Dict[int, str]] = None,
-    min_shared_wall: int = 2,
+    min_shared_wall: int = 1,
 ) -> bool:
     """Place a single room at a valid position in the floorplan.
 
@@ -494,6 +494,45 @@ def can_place_door(
     raise NotImplementedError("can_place_door not yet implemented")
 
 
+def _collect_leaf_rooms(
+    spec: List[Union[LeafRoom, MetaRoom]],
+) -> List[LeafRoom]:
+    """Recursively collect all LeafRoom objects from the spec.
+
+    Args:
+        spec: List of rooms (LeafRoom or MetaRoom).
+
+    Returns:
+        List of all LeafRoom objects found.
+    """
+    rooms = []
+    for room in spec:
+        if isinstance(room, LeafRoom):
+            rooms.append(room)
+        elif isinstance(room, MetaRoom):
+            rooms.extend(_collect_leaf_rooms(room.children))
+    return rooms
+
+
+def _get_rooms_by_type(
+    rooms: List[LeafRoom],
+) -> Dict[str, List[LeafRoom]]:
+    """Group rooms by their room type.
+
+    Args:
+        rooms: List of LeafRoom objects.
+
+    Returns:
+        Dict mapping room_type to list of rooms.
+    """
+    by_type: Dict[str, List[LeafRoom]] = {}
+    for room in rooms:
+        if room.room_type not in by_type:
+            by_type[room.room_type] = []
+        by_type[room.room_type].append(room)
+    return by_type
+
+
 def generate_floorplan_progressive(
     room_spec: RoomSpec,
     interior_boundary: np.ndarray,
@@ -503,6 +542,16 @@ def generate_floorplan_progressive(
 
     This approach places rooms one at a time, growing hallways to connect them,
     which allows for better control over room connectivity and door placement.
+
+    The algorithm:
+    1. Place LivingRoom first (no adjacency constraint)
+    2. Place Kitchen adjacent to LivingRoom
+    3. Place Hallway adjacent to LivingRoom
+    4. For each Bedroom: place adjacent to Hallway OR LivingRoom. If placement
+       fails, call grow_hallway() and retry.
+    5. For each Bathroom: place adjacent to Hallway OR a Bedroom (master suite)
+    6. Expand all rooms using grow_rect from floorplan_generation.py
+    7. Return the floorplan
 
     Args:
         room_spec: Room specification for the floorplan.
@@ -518,10 +567,117 @@ def generate_floorplan_progressive(
     Raises:
         InvalidFloorplan: If no valid floorplan could be generated.
     """
-    # TODO: Implement progressive floorplan generation
-    # For now, fall back to the standard generation
-    from procthor.generation.floorplan_generation import generate_floorplan
+    from procthor.generation.floorplan_generation import grow_rect
 
+    # Collect all leaf rooms
+    all_rooms = _collect_leaf_rooms(room_spec.spec)
+    rooms_by_type = _get_rooms_by_type(all_rooms)
+
+    # Get living rooms, kitchens, hallways, bedrooms, bathrooms
+    living_rooms = rooms_by_type.get("LivingRoom", [])
+    kitchens = rooms_by_type.get("Kitchen", [])
+    hallways = rooms_by_type.get("Hallway", [])
+    bedrooms = rooms_by_type.get("Bedroom", [])
+    bathrooms = rooms_by_type.get("Bathroom", [])
+
+    # Create room_type_map for adjacency lookups
+    room_type_map = room_spec.room_type_map
+
+    best_floorplan = None
+    best_room_count = 0
+
+    for _ in range(candidate_generations):
+        # Start with a copy of the boundary
+        floorplan = interior_boundary.copy()
+
+        placed_rooms: List[LeafRoom] = []
+        hallway_room: Optional[LeafRoom] = None
+
+        # 1. Place LivingRoom first (no adjacency constraint)
+        for living_room in living_rooms:
+            if place_room(living_room, floorplan, adjacent_to=None, room_type_map=room_type_map):
+                placed_rooms.append(living_room)
+
+        # 2. Place Kitchen adjacent to LivingRoom
+        for kitchen in kitchens:
+            if place_room(kitchen, floorplan, adjacent_to=["LivingRoom"], room_type_map=room_type_map):
+                placed_rooms.append(kitchen)
+
+        # 3. Place Hallway adjacent to LivingRoom
+        for hallway in hallways:
+            if place_room(hallway, floorplan, adjacent_to=["LivingRoom"], room_type_map=room_type_map):
+                placed_rooms.append(hallway)
+                hallway_room = hallway
+
+        # 3b. Pre-grow hallway to ensure enough wall space for bedrooms
+        # Grow hallway to be at least (num_bedrooms + 1) cells long
+        if hallway_room is not None:
+            min_hallway_cells = len(bedrooms) + 1
+            for _ in range(min_hallway_cells):
+                grew = grow_hallway(floorplan, hallway_room.room_id, growth_cells=1)
+                if not grew:
+                    break
+
+        # 4. For each Bedroom: place adjacent to Hallway OR LivingRoom
+        for bedroom in bedrooms:
+            # Try placing adjacent to Hallway or LivingRoom
+            placed = place_room(
+                bedroom, floorplan,
+                adjacent_to=["Hallway", "LivingRoom"],
+                room_type_map=room_type_map
+            )
+
+            if not placed and hallway_room is not None:
+                # If placement failed, try growing the hallway
+                for _ in range(3):  # Max 3 hallway growth attempts
+                    if grow_hallway(floorplan, hallway_room.room_id, growth_cells=1):
+                        # Retry placement after hallway growth
+                        placed = place_room(
+                            bedroom, floorplan,
+                            adjacent_to=["Hallway", "LivingRoom"],
+                            room_type_map=room_type_map
+                        )
+                        if placed:
+                            break
+
+            if placed:
+                placed_rooms.append(bedroom)
+
+        # 5. For each Bathroom: place adjacent to Hallway OR a Bedroom
+        for bathroom in bathrooms:
+            placed = place_room(
+                bathroom, floorplan,
+                adjacent_to=["Hallway", "Bedroom"],
+                room_type_map=room_type_map
+            )
+            if placed:
+                placed_rooms.append(bathroom)
+
+        # 6. Expand all rooms using grow_rect
+        # Keep growing until no room can grow anymore
+        still_growing = True
+        while still_growing:
+            still_growing = False
+            for room in placed_rooms:
+                if grow_rect(room, floorplan):
+                    still_growing = True
+
+        # Score this candidate by number of placed rooms
+        room_count = len(placed_rooms)
+        if room_count > best_room_count:
+            best_room_count = room_count
+            best_floorplan = floorplan.copy()
+
+        # If we placed all rooms, return immediately
+        if room_count == len(all_rooms):
+            return floorplan
+
+    # Return best candidate if we found one
+    if best_floorplan is not None:
+        return best_floorplan
+
+    # Fall back to standard generation if progressive failed completely
+    from procthor.generation.floorplan_generation import generate_floorplan
     return generate_floorplan(
         room_spec=room_spec,
         interior_boundary=interior_boundary,
