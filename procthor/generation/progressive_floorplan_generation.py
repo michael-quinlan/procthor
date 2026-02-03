@@ -13,24 +13,235 @@ from procthor.generation.room_specs import RoomSpec
 from procthor.utils.types import InvalidFloorplan, LeafRoom, MetaRoom
 
 
+def _get_shared_wall_length(
+    room1_cells: set,
+    room2_cells: set,
+) -> int:
+    """Count how many cells of shared wall exist between two rooms.
+
+    A shared wall cell is where a cell from room1 is orthogonally adjacent
+    to a cell from room2.
+
+    Args:
+        room1_cells: Set of (y, x) tuples for room 1.
+        room2_cells: Set of (y, x) tuples for room 2.
+
+    Returns:
+        Number of shared wall cell pairs (each pair is one grid edge).
+
+    Example:
+        >>> cells1 = {(0, 0), (0, 1), (1, 0), (1, 1)}
+        >>> cells2 = {(0, 2), (1, 2)}
+        >>> _get_shared_wall_length(cells1, cells2)
+        2
+    """
+    shared_count = 0
+    for (y1, x1) in room1_cells:
+        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            neighbor = (y1 + dy, x1 + dx)
+            if neighbor in room2_cells:
+                shared_count += 1
+    return shared_count
+
+
+def _get_room_cells(room_id: int, floorplan: np.ndarray) -> set:
+    """Get all cells belonging to a room.
+
+    Args:
+        room_id: The room ID to find cells for.
+        floorplan: The floorplan grid.
+
+    Returns:
+        Set of (y, x) tuples for all cells with the given room_id.
+    """
+    coords = np.argwhere(floorplan == room_id)
+    return {(int(y), int(x)) for y, x in coords}
+
+
+def _find_adjacent_room_ids(
+    adjacent_to: List[str],
+    floorplan: np.ndarray,
+    room_type_map: Dict[int, str],
+) -> List[int]:
+    """Find room IDs for rooms of the specified types that exist in the floorplan.
+
+    Args:
+        adjacent_to: List of room types to find (e.g., ["LivingRoom", "Hallway"]).
+        floorplan: The floorplan grid.
+        room_type_map: Mapping of room_id to room_type.
+
+    Returns:
+        List of room IDs that match the specified types and exist in the floorplan.
+    """
+    result = []
+    for room_id, room_type in room_type_map.items():
+        if room_type in adjacent_to:
+            if (floorplan == room_id).any():
+                result.append(room_id)
+    return result
+
+
 def place_room(
     room: Union[LeafRoom, MetaRoom],
     floorplan: np.ndarray,
-    target_position: Optional[Tuple[int, int]] = None,
+    adjacent_to: Optional[List[str]] = None,
+    room_type_map: Optional[Dict[int, str]] = None,
+    min_shared_wall: int = 2,
 ) -> bool:
-    """Place a single room at a position in the floorplan.
+    """Place a single room at a valid position in the floorplan.
+
+    Finds a position where the room can be placed adjacent to specified room types,
+    ensuring at least `min_shared_wall` cells of shared wall exist for door placement.
+
+    Algorithm:
+    1. If adjacent_to is specified, find all cells adjacent to those room types
+    2. For each candidate position (empty cell adjacent to target rooms):
+       a. Temporarily place the room (single cell initially)
+       b. Calculate shared wall length with target rooms
+       c. If shared wall >= min_shared_wall, accept placement
+    3. If no adjacent_to constraint, find any empty cell with good placement
+    4. The room is grown later by grow_rect/grow_l_shape functions
 
     Args:
         room: The room to place (LeafRoom or MetaRoom).
-        floorplan: The floorplan grid to place the room in.
-        target_position: Optional (y, x) position to place the room. If None,
-            a suitable position will be selected automatically.
+        floorplan: The floorplan grid to place the room in (modified in-place).
+        adjacent_to: Optional list of room types this room must be adjacent to.
+            If None, the room can be placed anywhere with empty space.
+        room_type_map: Mapping of room_id to room_type. Required if adjacent_to
+            is specified.
+        min_shared_wall: Minimum cells of shared wall required for door placement.
+            Default is 2 cells (standard door width).
 
     Returns:
         True if the room was placed successfully, False otherwise.
+
+    Example:
+        >>> import numpy as np
+        >>> floorplan = np.zeros((5, 5), dtype=int)
+        >>> floorplan[0:2, 0:3] = 2  # LivingRoom with ID 2
+        >>> room = type('Room', (), {'room_id': 3, 'room_type': 'Kitchen', 'ratio': 2})()
+        >>> room_type_map = {2: 'LivingRoom'}
+        >>> result = place_room(room, floorplan, adjacent_to=['LivingRoom'],
+        ...                     room_type_map=room_type_map, min_shared_wall=2)
+        >>> result  # Should be True if valid placement found
+        True
+        >>> (floorplan == 3).sum() >= 1  # Room was placed
+        True
     """
-    # TODO: Implement room placement logic
-    raise NotImplementedError("place_room not yet implemented")
+    rows, cols = floorplan.shape
+
+    # Find candidate positions (empty cells)
+    empty_mask = floorplan == EMPTY_ROOM_ID
+    if not empty_mask.any():
+        return False  # No empty cells available
+
+    # If adjacent_to is specified, find target room IDs and prioritize adjacent cells
+    target_room_ids = []
+    if adjacent_to and room_type_map:
+        target_room_ids = _find_adjacent_room_ids(adjacent_to, floorplan, room_type_map)
+        if not target_room_ids:
+            # No target rooms exist yet - can't satisfy adjacency constraint
+            # Place anywhere for now (first room of its type)
+            pass
+
+    # Build candidate positions with scoring
+    # Priority: cells adjacent to target rooms, then any empty cells
+    candidates = []
+
+    empty_coords = np.argwhere(empty_mask)
+    for y, x in empty_coords:
+        y, x = int(y), int(x)
+
+        # Check adjacency to target rooms
+        adjacent_to_target = False
+        shared_wall_potential = 0
+
+        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < rows and 0 <= nx < cols:
+                neighbor_id = floorplan[ny, nx]
+                if neighbor_id in target_room_ids:
+                    adjacent_to_target = True
+                    shared_wall_potential += 1
+
+        # Score: higher is better
+        # - Adjacent to target room: +100
+        # - More adjacent edges to target: +10 per edge
+        # - Not on boundary: +1 (allows room to grow in more directions)
+        score = 0
+        if adjacent_to_target:
+            score += 100 + shared_wall_potential * 10
+
+        # Prefer interior cells (not on edge)
+        if 0 < y < rows - 1 and 0 < x < cols - 1:
+            score += 1
+
+        candidates.append((score, y, x))
+
+    if not candidates:
+        return False
+
+    # Sort by score (descending) and try placements
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    # If we have adjacency constraints and target rooms exist, we need to find
+    # a placement that can potentially achieve min_shared_wall cells
+    if target_room_ids and min_shared_wall > 0:
+        # Try to find a placement where we can grow to meet the shared wall requirement
+        # For initial placement, we place a single cell and check if growing is feasible
+        for score, y, x in candidates:
+            if score >= 100:  # This cell is adjacent to a target room
+                # Check if placing here could lead to sufficient shared wall
+                # We need to verify that the room can grow to share min_shared_wall cells
+
+                # For a single cell, count potential shared wall with target rooms
+                potential_shared = 0
+                for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < rows and 0 <= nx < cols:
+                        if floorplan[ny, nx] in target_room_ids:
+                            potential_shared += 1
+
+                # Also check if we can grow the room to get more shared wall
+                # by checking empty cells adjacent to both this cell AND target rooms
+                growth_potential = 0
+                for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < rows and 0 <= nx < cols:
+                        if floorplan[ny, nx] == EMPTY_ROOM_ID:
+                            # This empty cell could be part of our room
+                            # Check if it's also adjacent to target rooms
+                            for dy2, dx2 in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                                ny2, nx2 = ny + dy2, nx + dx2
+                                if 0 <= ny2 < rows and 0 <= nx2 < cols:
+                                    if floorplan[ny2, nx2] in target_room_ids:
+                                        growth_potential += 1
+                                        break
+
+                # If we can potentially achieve the shared wall requirement
+                if potential_shared + growth_potential >= min_shared_wall:
+                    # Place the room at this cell
+                    floorplan[y, x] = room.room_id
+                    room.min_x = x
+                    room.min_y = y
+                    room.max_x = x + 1
+                    room.max_y = y + 1
+                    return True
+
+        # If we couldn't find a position with adjacency, fail
+        if adjacent_to:
+            return False
+
+    # No adjacency constraint or couldn't satisfy it - place at best available position
+    for score, y, x in candidates:
+        floorplan[y, x] = room.room_id
+        room.min_x = x
+        room.min_y = y
+        room.max_x = x + 1
+        room.max_y = y + 1
+        return True
+
+    return False
 
 
 def get_hallway_bounds(
