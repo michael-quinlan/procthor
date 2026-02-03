@@ -32,6 +32,7 @@ from .generation import (
     scale_boundary_groups,
 )
 from .house import House, HouseStructure, NextSamplingStage, PartialHouse
+from .room_proportions import validate_polygon_proportions, InvalidRoomProportions
 from .interior_boundaries import sample_interior_boundary
 from .layer import assign_layer_to_rooms
 from .lights import default_add_lights
@@ -169,8 +170,13 @@ class HouseGenerator:
                         room_spec=room_spec,
                         interior_boundary_scale=sampling_vars.interior_boundary_scale,
                     )
+                    # Validate room proportions (polygon areas)
+                    validate_polygon_proportions(
+                        house_structure=house_structure,
+                        room_spec=room_spec,
+                    )
                     break
-                except InvalidFloorplan:
+                except (InvalidFloorplan, InvalidRoomProportions):
                     pass
             else:
                 raise Exception(
