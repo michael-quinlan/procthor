@@ -1,214 +1,157 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
-Test script to analyze room proportion issues.
+Test script to analyze room proportion variance between grid cells and polygon areas.
 
-This script generates houses and compares:
-1. Grid cell counts (what validation sees)
-2. Polygon areas (what the final output has)
-
-Goal: Understand the variance and identify root cause.
+This helps identify the root cause of proportion validation failures.
 """
 
-import random
 import sys
+import random
 from typing import Dict, List, Tuple
-from dataclasses import dataclass
 
-# Add procthor to path
-sys.path.insert(0, '.')
+# Add the project to path
+sys.path.insert(0, '/Users/michaelqunlan/.workspaces/version-clean/procthor')
 
 from procthor.generation import HouseGenerator
 from procthor.generation.hallway_room_specs import HALLWAY_ROOM_SPEC_SAMPLER
 
 
-@dataclass
-class RoomStats:
-    room_id: int
-    room_type: str
-    grid_cells: int  # From floorplan grid
-    polygon_area_m2: float  # From final polygon
-    polygon_cells: float  # polygon_area / 3.61 (for comparison)
-    variance_pct: float  # (polygon_cells - grid_cells) / grid_cells * 100
+def get_polygon_areas(house) -> Dict[str, float]:
+    """Extract polygon areas from generated house."""
+    areas = {}
+    for room in house.rooms.values():
+        room_type = room.room_type
+        area_m2 = room.room_polygon.polygon.area
+        if room_type not in areas:
+            areas[room_type] = []
+        areas[room_type].append(area_m2)
+    return areas
 
 
-@dataclass 
-class HouseAnalysis:
-    seed: int
-    rooms: List[RoomStats]
-    living_room_area: float
-    max_bedroom_area: float
-    max_hallway_area: float
-    min_bedroom_area: float
-    passes_proportion_check: bool
-    failure_reason: str
-
-
-def analyze_house(seed: int) -> Tuple[HouseAnalysis, any]:
-    """Generate a house and analyze its room proportions."""
+def check_proportions(areas: Dict[str, List[float]]) -> Tuple[bool, List[str]]:
+    """Check if proportions are valid, return (passed, reasons)."""
+    issues = []
     
-    room_spec = HALLWAY_ROOM_SPEC_SAMPLER.sample()
-    generator = HouseGenerator(
-        split="train",
-        seed=seed,
-        room_spec=room_spec
-    )
+    living_areas = areas.get("LivingRoom", [])
+    bedroom_areas = areas.get("Bedroom", [])
+    hallway_areas = areas.get("Hallway", [])
     
-    try:
-        house, _ = generator.sample()
-    except Exception as e:
-        return None, generator
+    if not living_areas:
+        issues.append("No LivingRoom found")
+        return False, issues
     
-    # Get room type mapping
-    room_type_map = room_spec.room_type_map
-    
-    # Collect room stats
-    rooms = []
-    living_areas = []
-    bedroom_areas = []
-    hallway_areas = []
-    
-    for room_id, room in house.rooms.items():
-        room_type = room_type_map.get(room_id, "Unknown")
-        polygon_area = room.room_polygon.polygon.area
-        
-        # We don't have access to grid cells here, but we can estimate
-        # based on the standard cell size (1.9m x 1.9m = 3.61 m²)
-        polygon_cells = polygon_area / 3.61
-        
-        stats = RoomStats(
-            room_id=room_id,
-            room_type=room_type,
-            grid_cells=0,  # Would need to instrument generate_floorplan
-            polygon_area_m2=polygon_area,
-            polygon_cells=polygon_cells,
-            variance_pct=0  # Can't calculate without grid cells
-        )
-        rooms.append(stats)
-        
-        if room_type == "LivingRoom":
-            living_areas.append(polygon_area)
-        elif room_type == "Bedroom":
-            bedroom_areas.append(polygon_area)
-        elif room_type == "Hallway":
-            hallway_areas.append(polygon_area)
-    
-    # Calculate proportion check
-    living_area = max(living_areas) if living_areas else 0
+    living_area = sum(living_areas)  # Total living room area
     max_bedroom = max(bedroom_areas) if bedroom_areas else 0
-    min_bedroom = min(bedroom_areas) if bedroom_areas else float('inf')
     max_hallway = max(hallway_areas) if hallway_areas else 0
+    min_bedroom = min(bedroom_areas) if bedroom_areas else float('inf')
     
-    passes = True
-    failure_reason = ""
+    # Rule 1: LivingRoom should be >= largest bedroom
+    if bedroom_areas and living_area < max_bedroom:
+        diff = max_bedroom - living_area
+        pct = (diff / max_bedroom) * 100
+        issues.append(f"Living ({living_area:.1f}m²) < MaxBedroom ({max_bedroom:.1f}m²) by {pct:.0f}%")
     
-    if living_area < max_bedroom:
-        passes = False
-        failure_reason = f"LivingRoom ({living_area:.1f}m²) < MaxBedroom ({max_bedroom:.1f}m²)"
-    elif max_hallway > min_bedroom:
-        passes = False
-        failure_reason = f"Hallway ({max_hallway:.1f}m²) > MinBedroom ({min_bedroom:.1f}m²)"
-    elif living_area < max_hallway:
-        passes = False
-        failure_reason = f"LivingRoom ({living_area:.1f}m²) < Hallway ({max_hallway:.1f}m²)"
+    # Rule 2: Hallway should be <= smallest bedroom
+    if hallway_areas and bedroom_areas and max_hallway > min_bedroom:
+        diff = max_hallway - min_bedroom
+        pct = (diff / min_bedroom) * 100
+        issues.append(f"Hallway ({max_hallway:.1f}m²) > MinBedroom ({min_bedroom:.1f}m²) by {pct:.0f}%")
     
-    analysis = HouseAnalysis(
-        seed=seed,
-        rooms=rooms,
-        living_room_area=living_area,
-        max_bedroom_area=max_bedroom,
-        max_hallway_area=max_hallway,
-        min_bedroom_area=min_bedroom if min_bedroom != float('inf') else 0,
-        passes_proportion_check=passes,
-        failure_reason=failure_reason
-    )
+    # Rule 3: LivingRoom should be >= largest hallway
+    if hallway_areas and living_area < max_hallway:
+        diff = max_hallway - living_area
+        pct = (diff / living_area) * 100
+        issues.append(f"Living ({living_area:.1f}m²) < Hallway ({max_hallway:.1f}m²) by {pct:.0f}%")
     
-    return analysis, generator
+    return len(issues) == 0, issues
 
 
-def main():
+def main(n_houses: int = 20, seed: int = None):
+    print(f"Testing room proportions on {n_houses} houses...")
     print("=" * 80)
-    print("ROOM PROPORTION ANALYSIS")
-    print("=" * 80)
-    print()
     
-    num_houses = 20
-    analyses = []
-    generator = None
+    if seed is not None:
+        random.seed(seed)
     
-    for i in range(num_houses):
-        seed = random.randint(0, 999999)
-        print(f"\n--- House {i+1}/{num_houses} (seed={seed}) ---")
+    passed = 0
+    failed = 0
+    all_issues = []
+    
+    # Statistics for variance analysis
+    living_ratios = []
+    bedroom_ratios = []
+    hallway_ratios = []
+    
+    for i in range(n_houses):
+        house_seed = random.randint(0, 999999)
+        room_spec = HALLWAY_ROOM_SPEC_SAMPLER.sample()
         
-        analysis, gen = analyze_house(seed)
-        if gen:
-            generator = gen
+        try:
+            generator = HouseGenerator(
+                split="train",
+                seed=house_seed,
+                room_spec=room_spec
+            )
+            house, _ = generator.sample()
             
-        if analysis is None:
-            print("  FAILED TO GENERATE")
-            continue
+            if generator.controller:
+                generator.controller.stop()
             
-        analyses.append(analysis)
-        
-        # Print room breakdown
-        print(f"  Rooms:")
-        for r in sorted(analysis.rooms, key=lambda x: x.room_type):
-            print(f"    {r.room_type:12} (id={r.room_id}): {r.polygon_area_m2:6.1f} m² ({r.polygon_area_m2 * 10.764:.0f} sqft)")
-        
-        print(f"  Proportions:")
-        print(f"    LivingRoom:  {analysis.living_room_area:6.1f} m²")
-        print(f"    MaxBedroom:  {analysis.max_bedroom_area:6.1f} m²")
-        print(f"    MaxHallway:  {analysis.max_hallway_area:6.1f} m²")
-        print(f"    MinBedroom:  {analysis.min_bedroom_area:6.1f} m²")
-        
-        if analysis.passes_proportion_check:
-            print(f"  Result: ✓ PASS")
-        else:
-            print(f"  Result: ✗ FAIL - {analysis.failure_reason}")
-    
-    # Cleanup controller
-    if generator and generator.controller:
-        generator.controller.stop()
+            areas = get_polygon_areas(house)
+            is_valid, issues = check_proportions(areas)
+            
+            # Print results
+            status = "✓ PASS" if is_valid else "✗ FAIL"
+            print(f"\nHouse {i+1} (seed={house_seed}): {status}")
+            
+            # Print room areas
+            for room_type, room_areas in sorted(areas.items()):
+                total = sum(room_areas)
+                if len(room_areas) > 1:
+                    print(f"  {room_type}: {total:.1f}m² ({len(room_areas)} rooms @ {[f'{a:.1f}' for a in room_areas]})")
+                else:
+                    print(f"  {room_type}: {total:.1f}m²")
+            
+            if issues:
+                for issue in issues:
+                    print(f"  ❌ {issue}")
+                all_issues.extend(issues)
+                failed += 1
+            else:
+                passed += 1
+                
+        except Exception as e:
+            print(f"\nHouse {i+1} (seed={house_seed}): ✗ FAILED TO GENERATE")
+            print(f"  Error: {e}")
+            failed += 1
     
     # Summary
     print("\n" + "=" * 80)
-    print("SUMMARY")
-    print("=" * 80)
+    print(f"SUMMARY: {passed}/{passed+failed} passed ({100*passed/(passed+failed):.0f}%)")
     
-    passed = sum(1 for a in analyses if a.passes_proportion_check)
-    failed = len(analyses) - passed
-    
-    print(f"\nTotal: {len(analyses)} houses")
-    print(f"Passed: {passed} ({100*passed/len(analyses):.0f}%)")
-    print(f"Failed: {failed} ({100*failed/len(analyses):.0f}%)")
-    
-    if failed > 0:
-        print(f"\nFailure breakdown:")
-        living_lt_bed = sum(1 for a in analyses if not a.passes_proportion_check and "LivingRoom" in a.failure_reason and "Bedroom" in a.failure_reason)
-        hall_gt_bed = sum(1 for a in analyses if not a.passes_proportion_check and "Hallway" in a.failure_reason and "Bedroom" in a.failure_reason)
-        living_lt_hall = sum(1 for a in analyses if not a.passes_proportion_check and "LivingRoom" in a.failure_reason and "Hallway" in a.failure_reason and "Bedroom" not in a.failure_reason)
-        print(f"  LivingRoom < Bedroom: {living_lt_bed}")
-        print(f"  Hallway > Bedroom:    {hall_gt_bed}")
-        print(f"  LivingRoom < Hallway: {living_lt_hall}")
-    
-    # Worst cases
-    if failed > 0:
-        print(f"\nWorst failures:")
-        failures = [a for a in analyses if not a.passes_proportion_check]
-        failures.sort(key=lambda a: a.max_bedroom_area - a.living_room_area, reverse=True)
-        for a in failures[:5]:
-            print(f"  Seed {a.seed}: {a.failure_reason}")
-            print(f"    Living={a.living_room_area:.1f}m², MaxBed={a.max_bedroom_area:.1f}m², Hall={a.max_hallway_area:.1f}m²")
-    
-    # Room size distributions
-    print(f"\nRoom size ranges (m²):")
-    living_areas = [a.living_room_area for a in analyses]
-    bedroom_areas = [a.max_bedroom_area for a in analyses]
-    hallway_areas = [a.max_hallway_area for a in analyses]
-    
-    print(f"  LivingRoom: {min(living_areas):.1f} - {max(living_areas):.1f} (avg {sum(living_areas)/len(living_areas):.1f})")
-    print(f"  MaxBedroom: {min(bedroom_areas):.1f} - {max(bedroom_areas):.1f} (avg {sum(bedroom_areas)/len(bedroom_areas):.1f})")
-    print(f"  MaxHallway: {min(hallway_areas):.1f} - {max(hallway_areas):.1f} (avg {sum(hallway_areas)/len(hallway_areas):.1f})")
+    if all_issues:
+        print(f"\nMost common issues:")
+        issue_counts = {}
+        for issue in all_issues:
+            # Extract issue type
+            if "Living" in issue and "MaxBedroom" in issue:
+                key = "LivingRoom < MaxBedroom"
+            elif "Hallway" in issue and "MinBedroom" in issue:
+                key = "Hallway > MinBedroom"
+            elif "Living" in issue and "Hallway" in issue:
+                key = "LivingRoom < Hallway"
+            else:
+                key = issue
+            issue_counts[key] = issue_counts.get(key, 0) + 1
+        
+        for issue, count in sorted(issue_counts.items(), key=lambda x: -x[1]):
+            print(f"  {count}x {issue}")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-n", "--num-houses", type=int, default=20)
+    parser.add_argument("--seed", type=int, default=None)
+    args = parser.parse_args()
+    main(args.num_houses, args.seed)
