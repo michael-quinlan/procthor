@@ -845,17 +845,15 @@ def validate_strict_rules(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
         if not has_public_bathroom:
             return False
 
-    # Rule: Second+ bathrooms must be strict en-suites (exactly 1 connection to exactly 1 bedroom)
+    # Rule: Second+ bathrooms must be adjacent to at least one bedroom (for en-suite door placement)
+    # Note: Physical adjacency to multiple rooms is OK - door placement in doors.py
+    # ensures bathrooms only get one door (enforced at line 366-378 in doors.py)
     if len(bathrooms) >= 2:
         for bathroom_id in bathrooms[1:]:  # Skip first bathroom
             adjacent_ids = adjacencies.get(bathroom_id, set())
-            # Must have exactly 1 adjacent room
-            if len(adjacent_ids) != 1:
-                return False
-            # That room must be a bedroom
-            connected_room_id = list(adjacent_ids)[0]
-            connected_room_type = room_spec.room_type_map.get(connected_room_id)
-            if connected_room_type != "Bedroom":
+            adjacent_types = {room_spec.room_type_map.get(adj_id) for adj_id in adjacent_ids}
+            # Must have at least one adjacent bedroom (so door can be placed there)
+            if "Bedroom" not in adjacent_types:
                 return False
 
     return True
@@ -876,11 +874,65 @@ def recursively_expand_rooms(
             )
 
 
+def _debug_validation(room_spec: RoomSpec, floorplan: np.ndarray):
+    """Debug helper to show why validation failed."""
+    print("\n--- FLOORPLAN ---")
+    print(floorplan)
+
+    print("\n--- ROOM BOUNDS ---")
+    for room_id, room_type in room_spec.room_type_map.items():
+        room = room_spec.room_map[room_id]
+        print(f"Room {room_id} ({room_type}): ({room.min_y},{room.min_x})-({room.max_y},{room.max_x})")
+
+    adjacencies = get_room_adjacencies(floorplan)
+    print("\n--- ADJACENCIES ---")
+    for room_id, neighbors in adjacencies.items():
+        if room_id in room_spec.room_type_map:
+            room_type = room_spec.room_type_map[room_id]
+            neighbor_types = [room_spec.room_type_map.get(n, "?") for n in neighbors]
+            print(f"Room {room_id} ({room_type}): {neighbor_types}")
+
+    print("\n--- CHECKING RULES ---")
+    # Check rectangularity
+    for room_id, room_type in room_spec.room_type_map.items():
+        room = room_spec.room_map[room_id]
+        if room_type in ("Bedroom", "Bathroom"):
+            is_rect = np.all(floorplan[room.min_y:room.max_y, room.min_x:room.max_x] == room_id)
+            if not is_rect:
+                print(f"FAIL: {room_type} {room_id} is NOT rectangular")
+
+    # Check bedroom connections
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type == "Bedroom":
+            neighbors = adjacencies.get(room_id, set())
+            neighbor_types = {room_spec.room_type_map.get(n) for n in neighbors}
+            if "LivingRoom" not in neighbor_types and "Hallway" not in neighbor_types:
+                print(f"FAIL: Bedroom {room_id} not connected to LivingRoom/Hallway. Neighbors: {neighbor_types}")
+
+    # Check bathroom connections (en-suite rule)
+    public_connected = False
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type == "Bathroom":
+            neighbors = adjacencies.get(room_id, set())
+            neighbor_types = {room_spec.room_type_map.get(n) for n in neighbors}
+            if "LivingRoom" in neighbor_types or "Kitchen" in neighbor_types or "Hallway" in neighbor_types:
+                public_connected = True
+            else:
+                bedroom_count = sum(1 for n in neighbors if room_spec.room_type_map.get(n) == "Bedroom")
+                if len(neighbors) != 1 or bedroom_count != 1:
+                    print(f"FAIL: Bathroom {room_id} en-suite rule. Neighbors: {neighbors}, types={neighbor_types}")
+
+    if not public_connected:
+        print("FAIL: No bathroom connected to public area")
+    print("--- END DEBUG ---\n")
+
+
 def incremental_generate_floorplan(
     room_spec: RoomSpec,
     interior_boundary: np.ndarray,
-    candidate_generations: int = 1,
+    candidate_generations: int = 50,
     interior_boundary_scale: float = 1.9,
+    debug: bool = False,
 ) -> np.ndarray:
     """Generate floorplan by placing rooms one at a time.
 
@@ -986,6 +1038,9 @@ def incremental_generate_floorplan(
 
         # Check strict rules
         if not validate_strict_rules(room_spec=room_spec, floorplan=floorplan):
+            if debug:
+                print("Validation FAILED")
+                _debug_validation(room_spec, floorplan)
             continue
 
         score = score_floorplan(
@@ -1018,6 +1073,7 @@ def _find_adjacent_empty_region(
     target_room_id: int,
     min_size: int = 2,
     min_dim: int = 1,
+    exclude_adjacent_to: set = None,
 ) -> tuple:
     """Find an empty region adjacent to the target room.
 
@@ -1026,10 +1082,13 @@ def _find_adjacent_empty_region(
         target_room_id: The room to find space adjacent to.
         min_size: Minimum total cells (w * h >= min_size).
         min_dim: Minimum dimension in each direction (min(w, h) >= min_dim).
+        exclude_adjacent_to: Set of room IDs that the region must NOT be adjacent to.
 
     Returns (start_row, start_col, width, height) as Python ints, or None if no suitable region found.
     """
     rows, cols = int(floorplan.shape[0]), int(floorplan.shape[1])
+    if exclude_adjacent_to is None:
+        exclude_adjacent_to = set()
 
     # Find all cells adjacent to the target room
     target_mask = floorplan == target_room_id
@@ -1056,7 +1115,23 @@ def _find_adjacent_empty_region(
                         region = floorplan[r:r+h, c:c+w]
                         if (region == EMPTY_ROOM_ID).all():
                             if w * h >= min_size and min(w, h) >= min_dim:
-                                candidates.append((int(r), int(c), int(w), int(h), int(w * h)))
+                                # Check if this region would be adjacent to excluded rooms
+                                is_excluded = False
+                                if exclude_adjacent_to:
+                                    for rr in range(r, r + h):
+                                        for cc in range(c, c + w):
+                                            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                                                nr, nc = rr + dr, cc + dc
+                                                if 0 <= nr < rows and 0 <= nc < cols:
+                                                    if floorplan[nr, nc] in exclude_adjacent_to:
+                                                        is_excluded = True
+                                                        break
+                                            if is_excluded:
+                                                break
+                                        if is_excluded:
+                                            break
+                                if not is_excluded:
+                                    candidates.append((int(r), int(c), int(w), int(h), int(w * h)))
 
     if not candidates:
         return None
@@ -1259,7 +1334,7 @@ def _place_room_incrementally(
             else:
                 region = _find_empty_region(floorplan, min_size=2, prefer_center=False)
         else:
-            # En-suite bathroom - adjacent to bedroom
+            # En-suite bathroom - adjacent to exactly ONE bedroom (strict en-suite rule)
             bedrooms = [r for r in placed_rooms
                        if room_spec.room_type_map.get(r.room_id) == "Bedroom"]
             # Find bedrooms that don't already have a connected bathroom
@@ -1274,9 +1349,18 @@ def _place_room_incrementally(
                     available_bedrooms.append(bedroom)
 
             if available_bedrooms:
+                # Try to find a region adjacent to ONE bedroom but NOT adjacent to others
+                target_bedroom = random.choice(available_bedrooms)
+                other_bedrooms = {b.room_id for b in bedrooms if b.room_id != target_bedroom.room_id}
                 region = _find_adjacent_empty_region(
-                    floorplan, random.choice(available_bedrooms).room_id, min_size=2
+                    floorplan, target_bedroom.room_id, min_size=2,
+                    exclude_adjacent_to=other_bedrooms
                 )
+                # If no exclusive region found, try without exclusion (may fail validation)
+                if region is None:
+                    region = _find_adjacent_empty_region(
+                        floorplan, target_bedroom.room_id, min_size=2
+                    )
             elif bedrooms:
                 region = _find_adjacent_empty_region(
                     floorplan, random.choice(bedrooms).room_id, min_size=2
@@ -1380,19 +1464,33 @@ def _fill_empty_space(
 
     For bedrooms and bathrooms, only grow rectangularly to maintain their
     required rectangular shape. For other rooms, use L-shape growth.
+
+    En-suite bathrooms (second+ bathrooms) are NOT grown to preserve the
+    strict 1-bedroom adjacency rule.
     """
     # Separate rooms into rectangular-only (bedrooms/bathrooms) and L-shape allowed
     rect_only_types = {"Bedroom", "Bathroom"}
     rect_rooms = set()
     lshape_rooms = set()
 
+    # Identify en-suite bathrooms (all bathrooms after the first are en-suite)
+    # These should NOT grow because they must have exactly 1 bedroom neighbor
+    bathrooms = []
     for room in placed_rooms:
+        if room_spec and room_spec.room_type_map.get(room.room_id) == "Bathroom":
+            bathrooms.append(room)
+    ensuite_bathrooms = set(bathrooms[1:]) if len(bathrooms) > 1 else set()
+
+    for room in placed_rooms:
+        # Skip en-suite bathrooms - they shouldn't grow
+        if room in ensuite_bathrooms:
+            continue
         if room_spec and room_spec.room_type_map.get(room.room_id) in rect_only_types:
             rect_rooms.add(room)
         else:
             lshape_rooms.add(room)
 
-    # First, grow rectangular rooms (bedrooms/bathrooms) with grow_rect only
+    # First, grow rectangular rooms (bedrooms/first bathroom) with grow_rect only
     max_iterations = 500
     iteration = 0
     while rect_rooms and iteration < max_iterations:

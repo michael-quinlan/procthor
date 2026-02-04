@@ -196,14 +196,17 @@ def default_sample_house_structure(
             dims=None if room_spec.dims is None else room_spec.dims(),
         )
 
-    # Count bedrooms to decide which generator to use
+    # Count bedrooms and check for hallway to decide which generator to use
     num_bedrooms = sum(
         1 for room_type in room_spec.room_type_map.values() if room_type == "Bedroom"
     )
+    has_hallway = any(
+        room_type == "Hallway" for room_type in room_spec.room_type_map.values()
+    )
 
-    # Use incremental generator for 3+ bedroom houses
-    # (larger houses benefit from the incremental placement approach)
-    if num_bedrooms >= 3:
+    # Use incremental generator only for 3+ bedroom houses WITH a hallway
+    # (the incremental approach is designed for hallway-based specs)
+    if num_bedrooms >= 3 and has_hallway:
         floorplan = incremental_generate_floorplan(
             room_spec=room_spec,
             interior_boundary=interior_boundary,
