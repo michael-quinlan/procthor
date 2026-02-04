@@ -533,7 +533,7 @@ def get_hallway_shape_penalty(room_spec: RoomSpec, floorplan: np.ndarray) -> flo
 
 
 def get_hallway_connectivity_penalty(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
-    """Penalty if hallway doesn't connect to the LivingRoom."""
+    """Penalty if hallway doesn't connect to LivingRoom or Kitchen."""
     penalty = 0.0
     adjacencies = get_room_adjacencies(floorplan)
 
@@ -542,11 +542,13 @@ def get_hallway_connectivity_penalty(room_spec: RoomSpec, floorplan: np.ndarray)
             adjacent_ids = adjacencies.get(room_id, set())
             adjacent_types = {room_spec.room_type_map.get(adj_id) for adj_id in adjacent_ids}
 
-            # Hallway must connect to LivingRoom
-            if "LivingRoom" not in adjacent_types:
-                penalty -= 10.0  # Heavy penalty
+            # Hallway must connect to LivingRoom (preferred) or Kitchen (fallback)
+            if "LivingRoom" in adjacent_types:
+                penalty += 2.0  # Best: connected to LivingRoom
+            elif "Kitchen" in adjacent_types:
+                penalty += 1.0  # Acceptable: connected to Kitchen (fallback)
             else:
-                penalty += 2.0  # Reward good connectivity
+                penalty -= 10.0  # Heavy penalty: no public room connection
 
     return penalty
 
@@ -659,6 +661,38 @@ def get_bedroom_size_penalty(room_spec: RoomSpec, floorplan: np.ndarray) -> floa
     return penalty
 
 
+# Bedroom aspect ratio constraints
+# Bedrooms should not be too square (1:1) or too elongated (1:2+)
+# Valid range: 1.2 to 1.5 aspect ratio
+MIN_BEDROOM_ASPECT_RATIO = 1.2
+MAX_BEDROOM_ASPECT_RATIO = 1.5
+
+
+def get_bedroom_aspect_ratio_penalty(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Penalty for bedrooms with poor aspect ratios.
+
+    Bedrooms should have a 1:1.2 to 1:1.5 aspect ratio.
+    - Too square (< 1.2): penalized
+    - Too elongated (> 1.5): penalized
+    - Good ratio (1.2 to 1.5): rewarded
+    """
+    penalty = 0.0
+
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type == "Bedroom":
+            width, height, area = get_room_dimensions(room_id, floorplan)
+            if width > 0 and height > 0:
+                aspect_ratio = max(width, height) / min(width, height)
+                if aspect_ratio < MIN_BEDROOM_ASPECT_RATIO:
+                    penalty -= 5.0  # Too square
+                elif aspect_ratio > MAX_BEDROOM_ASPECT_RATIO:
+                    penalty -= 5.0  # Too elongated
+                else:
+                    penalty += 1.0  # Good ratio
+
+    return penalty
+
+
 def get_room_size_constraint_penalty(
     room_spec: RoomSpec,
     floorplan: np.ndarray,
@@ -747,6 +781,9 @@ def score_floorplan(
     # Rule 8: Rooms should be within target size constraints
     score += get_room_size_constraint_penalty(room_spec, floorplan, cell_size_sqm)
 
+    # Rule 9: Bedrooms should have good aspect ratios (1.2 to 1.5)
+    score += get_bedroom_aspect_ratio_penalty(room_spec, floorplan)
+
     return score
 
 
@@ -771,9 +808,9 @@ def validate_strict_rules(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
             if not is_room_rectangular(room_id, floorplan):
                 return False
 
-        # Rule: Hallways must connect to LivingRoom
+        # Rule: Hallways must connect to LivingRoom or Kitchen
         if room_type == "Hallway":
-            if "LivingRoom" not in adjacent_types:
+            if not adjacent_types.intersection({"LivingRoom", "Kitchen"}):
                 return False
 
         # Rule: Hallways must touch at least 2 rooms
@@ -796,7 +833,7 @@ def validate_strict_rules(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
 
     # Rule: At least one bathroom must be accessible from a public area
     # (not only through bedrooms) - ensures a "guest bathroom" exists
-    bathrooms = [rid for rid, rtype in room_spec.room_type_map.items() if rtype == "Bathroom"]
+    bathrooms = sorted([rid for rid, rtype in room_spec.room_type_map.items() if rtype == "Bathroom"])
     if bathrooms:
         has_public_bathroom = False
         for bathroom_id in bathrooms:
@@ -807,6 +844,19 @@ def validate_strict_rules(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
                 break
         if not has_public_bathroom:
             return False
+
+    # Rule: Second+ bathrooms must be strict en-suites (exactly 1 connection to exactly 1 bedroom)
+    if len(bathrooms) >= 2:
+        for bathroom_id in bathrooms[1:]:  # Skip first bathroom
+            adjacent_ids = adjacencies.get(bathroom_id, set())
+            # Must have exactly 1 adjacent room
+            if len(adjacent_ids) != 1:
+                return False
+            # That room must be a bedroom
+            connected_room_id = list(adjacent_ids)[0]
+            connected_room_type = room_spec.room_type_map.get(connected_room_id)
+            if connected_room_type != "Bedroom":
+                return False
 
     return True
 

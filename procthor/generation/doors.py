@@ -85,10 +85,12 @@ def get_required_doors(
     """Compute doors required by connectivity rules.
 
     Rules:
-    1. Each bedroom must have a door to LivingRoom or Hallway
+    1. Each bedroom must have a door to LivingRoom or Hallway (NEVER Kitchen)
     2. At least one bathroom must have a door to a public room
-    3. Each hallway must have a door to LivingRoom
-    4. Each hallway must have doors to at least 2 rooms
+    3. Bathroom door preferences: Hallway > LivingRoom > Bedroom > Kitchen (last resort)
+    4. Each hallway must have a door to LivingRoom (or Kitchen as fallback)
+    5. Each hallway must have doors to at least 2 rooms
+    6. All rooms must have at least one door
 
     Args:
         neighboring_rooms: Set of (room_id_1, room_id_2) tuples for adjacent rooms.
@@ -110,11 +112,23 @@ def get_required_doors(
                 adjacent.append(r1)
         return adjacent
 
-    def add_door(room1: int, room2: int):
-        """Add a door between two rooms (normalized order)."""
+    def find_all_adjacent(room_id: int) -> List[int]:
+        """Find all rooms adjacent to room_id."""
+        adjacent = []
+        for r1, r2 in neighboring_rooms:
+            if r1 == room_id and r2 in room_type_map:
+                adjacent.append(r2)
+            elif r2 == room_id and r1 in room_type_map:
+                adjacent.append(r1)
+        return adjacent
+
+    def add_door(room1: int, room2: int) -> bool:
+        """Add a door between two rooms (normalized order). Returns True if added."""
         door = (min(room1, room2), max(room1, room2))
         if door not in required_doors and door in neighboring_rooms:
             required_doors.append(door)
+            return True
+        return False
 
     # Group rooms by type
     bedrooms = [rid for rid, rtype in room_type_map.items() if rtype == "Bedroom"]
@@ -122,9 +136,10 @@ def get_required_doors(
     hallways = [rid for rid, rtype in room_type_map.items() if rtype == "Hallway"]
     living_rooms = [rid for rid, rtype in room_type_map.items() if rtype == "LivingRoom"]
 
-    # Rule 1: Each bedroom needs door to LivingRoom or Hallway
+    # Rule 1: Each bedroom needs door to LivingRoom or Hallway (NEVER Kitchen)
+    # Bedroom-Kitchen doors are explicitly forbidden
     for bedroom_id in bedrooms:
-        # Try hallway first (preferred), then living room
+        # Try hallway first (preferred), then living room, then any non-Kitchen room
         adjacent_hallways = find_adjacent_of_type(bedroom_id, {"Hallway"})
         if adjacent_hallways:
             add_door(bedroom_id, random.choice(adjacent_hallways))
@@ -132,39 +147,99 @@ def get_required_doors(
             adjacent_living = find_adjacent_of_type(bedroom_id, {"LivingRoom"})
             if adjacent_living:
                 add_door(bedroom_id, random.choice(adjacent_living))
+            else:
+                # Fallback: any adjacent room EXCEPT Kitchen
+                all_adjacent = find_all_adjacent(bedroom_id)
+                non_kitchen = [r for r in all_adjacent if room_type_map.get(r) != "Kitchen"]
+                if non_kitchen:
+                    add_door(bedroom_id, random.choice(non_kitchen))
+                else:
+                    # Only Kitchen is adjacent - log warning but bedroom must have door
+                    # This is an error condition in house layout
+                    logging.warning(
+                        f"Bedroom {bedroom_id} only has Kitchen as adjacent room - "
+                        "this violates bedroom-kitchen door constraint"
+                    )
 
-    # Rule 2: Each bathroom gets exactly ONE door
-    # Priority: public room (hallway/living) > bedroom > any adjacent room
-    # At least one bathroom should have public access if possible
-    bathroom_has_public_door = False
-    for bathroom_id in bathrooms:
-        # Try public room first (hallway, living room, kitchen)
+    # Rule 2: Bathroom door placement with preferences
+    # Priority order: Hallway > LivingRoom > Bedroom > Kitchen (last resort)
+    # - First bathroom: prioritize public room access
+    # - Second bathroom (if present): MUST connect to exactly 1 bedroom (strict en-suite)
+    # - At least one bathroom must have public access
+
+    # Sort bathrooms to process in order - we'll assign the first one to public, second to en-suite
+    sorted_bathrooms = sorted(bathrooms)
+
+    for idx, bathroom_id in enumerate(sorted_bathrooms):
         adjacent_public = find_adjacent_of_type(bathroom_id, PUBLIC_ROOM_TYPES)
-        if adjacent_public:
-            add_door(bathroom_id, random.choice(adjacent_public))
-            bathroom_has_public_door = True
-            continue
-
-        # Try bedroom (en-suite)
         adjacent_bedrooms = find_adjacent_of_type(bathroom_id, {"Bedroom"})
-        if adjacent_bedrooms:
-            add_door(bathroom_id, random.choice(adjacent_bedrooms))
-            continue
 
-        # Fall back to any adjacent room
-        for r1, r2 in neighboring_rooms:
-            if r1 == bathroom_id and r2 in room_type_map:
-                add_door(bathroom_id, r2)
-                break
-            elif r2 == bathroom_id and r1 in room_type_map:
-                add_door(bathroom_id, r1)
-                break
+        if idx == 0:
+            # First bathroom: prioritize public room access
+            # Priority order: Hallway > LivingRoom > Bedroom > Kitchen (last resort)
+            adj_hallways = [r for r in adjacent_public if room_type_map.get(r) == "Hallway"]
+            adj_living = [r for r in adjacent_public if room_type_map.get(r) == "LivingRoom"]
+            adj_kitchens = [r for r in adjacent_public if room_type_map.get(r) == "Kitchen"]
 
-    # Rule 3: Each hallway needs door to LivingRoom
+            if adj_hallways:
+                add_door(bathroom_id, random.choice(adj_hallways))
+                continue
+            elif adj_living:
+                add_door(bathroom_id, random.choice(adj_living))
+                continue
+            elif adjacent_bedrooms:
+                # Bedroom is preferred over Kitchen
+                add_door(bathroom_id, random.choice(adjacent_bedrooms))
+                continue
+            elif adj_kitchens:
+                # Kitchen is last resort for bathrooms
+                logging.debug(f"Bathroom {bathroom_id} connecting to Kitchen as last resort")
+                add_door(bathroom_id, random.choice(adj_kitchens))
+                continue
+
+            # Last resort: any adjacent room
+            all_adjacent = find_all_adjacent(bathroom_id)
+            if all_adjacent:
+                add_door(bathroom_id, random.choice(all_adjacent))
+        else:
+            # Second+ bathroom: MUST be strict en-suite (exactly 1 door to exactly 1 bedroom)
+            if adjacent_bedrooms:
+                # Connect to exactly one bedroom - strict en-suite
+                add_door(bathroom_id, random.choice(adjacent_bedrooms))
+                continue
+
+            # If no adjacent bedrooms, fall back with preference order
+            # Priority: Hallway > LivingRoom > Kitchen
+            adj_hallways = [r for r in adjacent_public if room_type_map.get(r) == "Hallway"]
+            adj_living = [r for r in adjacent_public if room_type_map.get(r) == "LivingRoom"]
+            adj_kitchens = [r for r in adjacent_public if room_type_map.get(r) == "Kitchen"]
+
+            if adj_hallways:
+                add_door(bathroom_id, random.choice(adj_hallways))
+                continue
+            elif adj_living:
+                add_door(bathroom_id, random.choice(adj_living))
+                continue
+            elif adj_kitchens:
+                logging.debug(f"Bathroom {bathroom_id} connecting to Kitchen as last resort")
+                add_door(bathroom_id, random.choice(adj_kitchens))
+                continue
+
+            # Last resort: any adjacent room
+            all_adjacent = find_all_adjacent(bathroom_id)
+            if all_adjacent:
+                add_door(bathroom_id, random.choice(all_adjacent))
+
+    # Rule 3: Each hallway needs door to LivingRoom (preferred) or Kitchen (fallback)
     for hallway_id in hallways:
         adjacent_living = find_adjacent_of_type(hallway_id, {"LivingRoom"})
         if adjacent_living:
             add_door(hallway_id, random.choice(adjacent_living))
+        else:
+            # Fallback to Kitchen if no LivingRoom available
+            adjacent_kitchen = find_adjacent_of_type(hallway_id, {"Kitchen"})
+            if adjacent_kitchen:
+                add_door(hallway_id, random.choice(adjacent_kitchen))
 
     # Rule 4: Hallways need at least 2 doors - add more if needed
     for hallway_id in hallways:
@@ -186,6 +261,37 @@ def get_required_doors(
                         hallway_doors = [d for d in required_doors if hallway_id in d]
                         if len(hallway_doors) >= 2:
                             break
+
+    # Rule 5: All rooms must have at least one door - validation and fallback
+    rooms_with_doors = set()
+    for door in required_doors:
+        rooms_with_doors.add(door[0])
+        rooms_with_doors.add(door[1])
+
+    for room_id in room_type_map.keys():
+        if room_id not in rooms_with_doors:
+            room_type = room_type_map[room_id]
+            all_adjacent = find_all_adjacent(room_id)
+
+            if all_adjacent:
+                # For bedrooms, avoid Kitchen if possible
+                if room_type == "Bedroom":
+                    non_kitchen = [r for r in all_adjacent if room_type_map.get(r) != "Kitchen"]
+                    if non_kitchen:
+                        add_door(room_id, random.choice(non_kitchen))
+                        logging.debug(f"Added fallback door for {room_type} {room_id} (avoiding Kitchen)")
+                    else:
+                        # Only Kitchen is adjacent - skip adding door
+                        # The room will fail "all rooms must have doors" validation later
+                        logging.debug(
+                            f"Bedroom {room_id} only adjacent to Kitchen - "
+                            "skipping door (floorplan will be rejected)"
+                        )
+                else:
+                    add_door(room_id, random.choice(all_adjacent))
+                    logging.debug(f"Added fallback door for {room_type} {room_id}")
+            else:
+                logging.error(f"Room {room_id} ({room_type}) has no adjacent rooms - cannot add door")
 
     return required_doors
 
@@ -217,15 +323,29 @@ def default_add_doors(
         room_spec=room_spec,
     )
 
+    # Filter required_doors to remove any bedroom-kitchen doors
+    # (should not happen normally, but ensure constraint is enforced)
+    filtered_required_doors = []
+    for door in required_doors:
+        room1_type = room_spec.room_type_map.get(door[0])
+        room2_type = room_spec.room_type_map.get(door[1])
+        if (room1_type == "Bedroom" and room2_type == "Kitchen") or \
+           (room1_type == "Kitchen" and room2_type == "Bedroom"):
+            logging.debug(
+                f"Filtering out bedroom-kitchen door from required_doors: {door}"
+            )
+            continue
+        filtered_required_doors.append(door)
+
     # Track which bathrooms already have a door
     bathrooms_with_doors = set()
-    for door in required_doors:
+    for door in filtered_required_doors:
         for room_id in door:
             if room_spec.room_type_map.get(room_id) == "Bathroom":
                 bathrooms_with_doors.add(room_id)
 
     # Combine: required doors + hierarchy doors (avoiding duplicates and forbidden connections)
-    all_openings = list(required_doors)
+    all_openings = list(filtered_required_doors)
     for opening in hierarchy_openings:
         if opening not in all_openings:
             room1_type = room_spec.room_type_map.get(opening[0])
@@ -233,6 +353,14 @@ def default_add_doors(
 
             # RULE: Never add doors between two bedrooms
             if room1_type == "Bedroom" and room2_type == "Bedroom":
+                continue
+
+            # RULE: Never add doors between Bedroom and Kitchen
+            if (room1_type == "Bedroom" and room2_type == "Kitchen") or \
+               (room1_type == "Kitchen" and room2_type == "Bedroom"):
+                logging.debug(
+                    f"Skipping bedroom-kitchen door between rooms {opening[0]} and {opening[1]}"
+                )
                 continue
 
             # RULE: Bathrooms only get one door

@@ -166,33 +166,63 @@ def validate_bathroom_public_access(
     room_spec: "RoomSpec",
     adjacency: Dict[int, Set[int]],
 ) -> List[str]:
-    """Validate that at least one bathroom has a door to a public area.
+    """Validate bathroom access constraints.
 
-    This ensures there's a "guest bathroom" accessible without going through
-    a private room like a bedroom.
+    Rules:
+    1. At least one bathroom MUST have a door to a public room (Hallway, LivingRoom, Kitchen)
+    2. Second bathroom (if present) MUST connect to EXACTLY ONE bedroom and NOTHING else (strict en-suite)
 
     Returns:
-        List of error messages (empty if constraint is satisfied).
+        List of error messages (empty if all constraints are satisfied).
     """
+    errors = []
     room_type_map = room_spec.room_type_map
 
     # Find all bathrooms
-    bathrooms = [rid for rid, rtype in room_type_map.items() if rtype == "Bathroom"]
+    bathrooms = sorted([rid for rid, rtype in room_type_map.items() if rtype == "Bathroom"])
 
     if not bathrooms:
         return []  # No bathrooms, nothing to validate
 
-    # Check if any bathroom is directly connected to a public room via door
+    # Rule 1: Check if at least one bathroom is directly connected to a public room
+    has_public_bathroom = False
     for bathroom_id in bathrooms:
         adjacent_ids = adjacency.get(bathroom_id, set())
         adjacent_types = {room_type_map.get(aid) for aid in adjacent_ids}
         if adjacent_types.intersection(PUBLIC_ROOM_TYPES):
-            return []  # Found at least one bathroom with public access
+            has_public_bathroom = True
+            break
 
-    return [
-        "No bathroom has direct door access to a public room. "
-        f"At least one bathroom should connect to {PUBLIC_ROOM_TYPES}"
-    ]
+    if not has_public_bathroom:
+        errors.append(
+            "No bathroom has direct door access to a public room. "
+            f"At least one bathroom should connect to {PUBLIC_ROOM_TYPES}"
+        )
+
+    # Rule 2: Second+ bathrooms must be strict en-suites (exactly 1 door to exactly 1 bedroom)
+    if len(bathrooms) >= 2:
+        for bathroom_id in bathrooms[1:]:  # Skip first bathroom
+            adjacent_ids = adjacency.get(bathroom_id, set())
+            num_connections = len(adjacent_ids)
+
+            # Check if connected to exactly 1 room
+            if num_connections != 1:
+                errors.append(
+                    f"En-suite bathroom (room {bathroom_id}) must have exactly 1 door, "
+                    f"but has {num_connections} connections"
+                )
+                continue
+
+            # Check if that 1 room is a bedroom
+            connected_room_id = list(adjacent_ids)[0]
+            connected_room_type = room_type_map.get(connected_room_id)
+            if connected_room_type != "Bedroom":
+                errors.append(
+                    f"En-suite bathroom (room {bathroom_id}) must connect to a bedroom, "
+                    f"but connects to {connected_room_type} (room {connected_room_id})"
+                )
+
+    return errors
 
 
 def validate_hallway_connections(
@@ -202,7 +232,7 @@ def validate_hallway_connections(
     """Validate hallway door connectivity rules.
 
     Rules:
-    - Hallways must have a door to LivingRoom
+    - Hallways must have a door to LivingRoom or Kitchen (prefer LivingRoom)
     - Hallways must have doors to at least 2 rooms
 
     Returns:
@@ -216,10 +246,10 @@ def validate_hallway_connections(
             adjacent_ids = adjacency.get(room_id, set())
             adjacent_types = {room_type_map.get(aid) for aid in adjacent_ids}
 
-            # Hallway must have door to LivingRoom
-            if "LivingRoom" not in adjacent_types:
+            # Hallway must have door to LivingRoom or Kitchen
+            if not adjacent_types.intersection({"LivingRoom", "Kitchen"}):
                 errors.append(
-                    f"Hallway (room {room_id}) has no door to LivingRoom"
+                    f"Hallway (room {room_id}) has no door to LivingRoom or Kitchen"
                 )
 
             # Hallway must connect at least 2 rooms via doors
