@@ -1052,6 +1052,41 @@ def validate_bathroom_public_access(room_spec: RoomSpec, floorplan: np.ndarray) 
     return False  # No bathroom has public access - REJECT
 
 
+def validate_bedroom_aspect_ratio(
+    room_spec: "RoomSpec",
+    floorplan: np.ndarray,
+    min_ratio: float = 1.2,
+    max_ratio: float = 1.5,
+) -> bool:
+    """Reject if any bedroom has aspect ratio outside 1:1.2 to 1:1.5 range.
+
+    Examples:
+    - 10x12 = 1.2 ratio → OK
+    - 10x15 = 1.5 ratio → OK
+    - 10x10 = 1.0 ratio → REJECT (too square)
+    - 10x20 = 2.0 ratio → REJECT (too elongated)
+    """
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type != "Bedroom":
+            continue
+
+        # Get room dimensions
+        rows, cols = np.where(floorplan == room_id)
+        if len(rows) == 0:
+            continue
+
+        height = rows.max() - rows.min() + 1
+        width = cols.max() - cols.min() + 1
+
+        # Calculate aspect ratio (always >= 1)
+        ratio = max(width, height) / min(width, height)
+
+        if ratio < min_ratio or ratio > max_ratio:
+            return False  # Reject
+
+    return True  # All bedrooms OK
+
+
 def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
     """Calculate the quality of the floorplan based on the room specifications."""
     score = 0.0
@@ -1141,6 +1176,10 @@ def generate_floorplan(
 
         # Hard rejection for no bathroom with public access
         if not validate_bathroom_public_access(room_spec=room_spec, floorplan=floorplan):
+            continue
+
+        # Hard rejection for bedroom aspect ratio outside 1:1.2 to 1:1.5 range
+        if not validate_bedroom_aspect_ratio(room_spec=room_spec, floorplan=floorplan):
             continue
 
         score = score_floorplan(room_spec=room_spec, floorplan=floorplan)
