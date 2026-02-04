@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from ai2thor.controller import Controller
 from attrs import define
-from moviepy.editor import ImageSequenceClip
+from moviepy import ImageSequenceClip
 from shapely.geometry import Point
 
 from procthor.constants import FLOOR_Y, PROCTHOR_INITIALIZATION, SCHEMA
