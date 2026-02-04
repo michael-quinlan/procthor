@@ -160,7 +160,7 @@ def sample_asset_y_position(
 
 #%% Windows
 
-ROOM_TYPES_WITH_WINDOWS = {"Bedroom", "Kitchen", "LivingRoom"}
+ROOM_TYPES_WITH_WINDOWS = {"Bedroom", "Kitchen", "LivingRoom", "Hallway"}
 """The room types that windows can exist in."""
 
 WINDOWS_PER_ROOM = {"population": [0, 1, 2], "weights": [0.125, 0.375, 0.5]}
@@ -472,8 +472,8 @@ PAINTINGS_PER_ROOM = {
 }
 """The distribution over the maximum paintings attempted to be placed per room."""
 
-ROOM_TYPES_WITH_PAINTINGS = {"Bedroom", "Kitchen", "LivingRoom", "Bathroom"}
-"""The room types that windows can exist in."""
+ROOM_TYPES_WITH_PAINTINGS = {"Bedroom", "Kitchen", "LivingRoom", "Bathroom", "Hallway"}
+"""The room types that paintings can exist in."""
 
 PAINTING_WALL_PADDING = 5e-3
 """Avoids the clipping jitter on the other side of the wall."""

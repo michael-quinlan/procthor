@@ -196,7 +196,9 @@ def default_sample_house_structure(
             dims=None if room_spec.dims is None else room_spec.dims(),
         )
     floorplan = generate_floorplan(
-        room_spec=room_spec, interior_boundary=interior_boundary
+        room_spec=room_spec,
+        interior_boundary=interior_boundary,
+        interior_boundary_scale=interior_boundary_scale,
     )
 
     # NOTE: Pad the floorplan with the outdoor room id to make
@@ -224,7 +226,7 @@ def default_sample_house_structure(
 
 def create_empty_partial_house(
     xz_poly_map: Dict[int, XZPoly],
-    room_type_map: Dict[int, Literal["Bedroom", "Bathroom", "Kitchen", "LivingRoom"]],
+    room_type_map: Dict[int, Literal["Bedroom", "Bathroom", "Kitchen", "LivingRoom", "Hallway"]],
     ceiling_height: float,
 ) -> PartialHouse:
     walls = []

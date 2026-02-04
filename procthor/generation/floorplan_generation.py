@@ -422,11 +422,393 @@ def get_ratio_overlap_score(room_spec: RoomSpec, floorplan: np.ndarray) -> float
     return ratio_overlap
 
 
-def score_floorplan(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
-    """Calculate the quality of the floorplan based on the room specifications."""
-    # TODO: Consider ranking by adjacency constraints, maybe hallway connections.
-    ratio_overlap_score = get_ratio_overlap_score(room_spec, floorplan)
-    return ratio_overlap_score
+# Room types that must be rectangular (no L-shapes)
+ROOM_TYPES_MUST_BE_RECTANGULAR = {"Bedroom", "Bathroom"}
+
+
+def get_room_dimensions(room_id: int, floorplan: np.ndarray) -> tuple:
+    """Get the width and height of a room's bounding box.
+
+    Returns (width, height, area) of the room.
+    """
+    room_mask = floorplan == room_id
+    if not room_mask.any():
+        return (0, 0, 0)
+
+    rows = np.any(room_mask, axis=1)
+    cols = np.any(room_mask, axis=0)
+    row_min, row_max = np.where(rows)[0][[0, -1]]
+    col_min, col_max = np.where(cols)[0][[0, -1]]
+
+    width = col_max - col_min + 1
+    height = row_max - row_min + 1
+    area = room_mask.sum()
+
+    return (width, height, area)
+
+
+def is_room_rectangular(room_id: int, floorplan: np.ndarray) -> bool:
+    """Check if a room in the floorplan is rectangular."""
+    room_mask = floorplan == room_id
+    if not room_mask.any():
+        return True
+
+    rows = np.any(room_mask, axis=1)
+    cols = np.any(room_mask, axis=0)
+    row_min, row_max = np.where(rows)[0][[0, -1]]
+    col_min, col_max = np.where(cols)[0][[0, -1]]
+
+    actual_cells = room_mask.sum()
+    bounding_box_cells = (row_max - row_min + 1) * (col_max - col_min + 1)
+
+    return actual_cells == bounding_box_cells
+
+
+def get_room_adjacencies(floorplan: np.ndarray) -> dict:
+    """Get which rooms are adjacent to each other in the floorplan.
+
+    Returns dict mapping room_id -> set of adjacent room_ids.
+    """
+    adjacencies = {}
+    rows, cols = floorplan.shape
+
+    for room_id in np.unique(floorplan):
+        if room_id in {EMPTY_ROOM_ID, OUTDOOR_ROOM_ID}:
+            continue
+        adjacencies[room_id] = set()
+
+        room_mask = floorplan == room_id
+        # Check all 4 directions for adjacency
+        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            for r in range(rows):
+                for c in range(cols):
+                    if room_mask[r, c]:
+                        nr, nc = r + dy, c + dx
+                        if 0 <= nr < rows and 0 <= nc < cols:
+                            neighbor = floorplan[nr, nc]
+                            if neighbor != room_id and neighbor not in {EMPTY_ROOM_ID, OUTDOOR_ROOM_ID}:
+                                adjacencies[room_id].add(neighbor)
+
+    return adjacencies
+
+
+def get_rectangular_penalty(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Penalty for non-rectangular bedrooms/bathrooms."""
+    penalty = 0.0
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type in ROOM_TYPES_MUST_BE_RECTANGULAR:
+            if not is_room_rectangular(room_id, floorplan):
+                penalty -= 10.0
+    return penalty
+
+
+def get_hallway_shape_penalty(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Penalty for hallways that are too square (should be long and narrow)."""
+    penalty = 0.0
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type == "Hallway":
+            width, height, area = get_room_dimensions(room_id, floorplan)
+            if width == 0 or height == 0:
+                continue
+
+            # Aspect ratio: how elongated is the hallway?
+            aspect_ratio = max(width, height) / min(width, height)
+
+            # Hallways should have aspect ratio >= 2 (at least 2x longer than wide)
+            # Reward narrow hallways, penalize square ones
+            if aspect_ratio < 1.5:
+                penalty -= 5.0  # Very square, bad
+            elif aspect_ratio < 2.0:
+                penalty -= 2.0  # Somewhat square
+            else:
+                penalty += 1.0  # Good, elongated hallway
+
+            # Hallways should also be relatively small (not take up too much space)
+            total_area = (floorplan != OUTDOOR_ROOM_ID).sum()
+            hallway_ratio = area / total_area
+            if hallway_ratio > 0.15:  # Hallway is more than 15% of house
+                penalty -= 3.0
+
+    return penalty
+
+
+def get_hallway_connectivity_penalty(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Penalty if hallway doesn't connect to the LivingRoom."""
+    penalty = 0.0
+    adjacencies = get_room_adjacencies(floorplan)
+
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type == "Hallway":
+            adjacent_ids = adjacencies.get(room_id, set())
+            adjacent_types = {room_spec.room_type_map.get(adj_id) for adj_id in adjacent_ids}
+
+            # Hallway must connect to LivingRoom
+            if "LivingRoom" not in adjacent_types:
+                penalty -= 10.0  # Heavy penalty
+            else:
+                penalty += 2.0  # Reward good connectivity
+
+    return penalty
+
+
+def get_kitchen_livingroom_adjacency_bonus(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Bonus if Kitchen is adjacent to LivingRoom (open concept)."""
+    bonus = 0.0
+    adjacencies = get_room_adjacencies(floorplan)
+
+    kitchen_ids = [rid for rid, rt in room_spec.room_type_map.items() if rt == "Kitchen"]
+
+    for kitchen_id in kitchen_ids:
+        adjacent_ids = adjacencies.get(kitchen_id, set())
+        adjacent_types = {room_spec.room_type_map.get(adj_id) for adj_id in adjacent_ids}
+
+        if "LivingRoom" in adjacent_types:
+            bonus += 2.0  # Reward kitchen-livingroom adjacency
+
+    return bonus
+
+
+def get_bathroom_size_penalty(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Penalty if bathrooms are larger than bedrooms."""
+    penalty = 0.0
+
+    bathroom_areas = []
+    bedroom_areas = []
+
+    for room_id, room_type in room_spec.room_type_map.items():
+        _, _, area = get_room_dimensions(room_id, floorplan)
+        if room_type == "Bathroom":
+            bathroom_areas.append(area)
+        elif room_type == "Bedroom":
+            bedroom_areas.append(area)
+
+    if bathroom_areas and bedroom_areas:
+        max_bathroom = max(bathroom_areas)
+        min_bedroom = min(bedroom_areas)
+
+        # Bathrooms should be smaller than bedrooms
+        if max_bathroom >= min_bedroom:
+            penalty -= 3.0
+
+    return penalty
+
+
+def get_bedroom_connectivity_penalty(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Penalty if bedrooms don't connect to a LivingRoom or Hallway.
+
+    Bedrooms should be accessible from common areas, not only through
+    kitchens, bathrooms, or other bedrooms.
+    """
+    penalty = 0.0
+    adjacencies = get_room_adjacencies(floorplan)
+
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type == "Bedroom":
+            adjacent_ids = adjacencies.get(room_id, set())
+            adjacent_types = {room_spec.room_type_map.get(adj_id) for adj_id in adjacent_ids}
+
+            # Bedroom must connect to LivingRoom or Hallway
+            if not adjacent_types.intersection({"LivingRoom", "Hallway"}):
+                penalty -= 10.0  # Heavy penalty
+            else:
+                penalty += 1.0  # Small reward for good connectivity
+
+    return penalty
+
+
+# US Building Code (IRC) minimum bedroom requirements
+# Minimum area: 6.5 sq meters (70 sq ft)
+# Minimum dimension: 2.13 meters (7 feet)
+# Grid scale is typically 3 meters per cell, so:
+#   - 1 cell = 9 sq meters (exceeds 6.5 sq m minimum)
+#   - 1 cell width = 3 meters (exceeds 2.13m minimum)
+# For more realistic bedrooms, we require at least 2 cells area and
+# prefer at least 2 cells in each dimension (6m x 6m = 36 sq m)
+MIN_BEDROOM_AREA_CELLS = 2  # ~18 sq meters at 3m/cell scale
+MIN_BEDROOM_DIMENSION_CELLS = 2  # ~6 meters at 3m/cell scale
+
+
+def get_bedroom_size_penalty(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Penalty for bedrooms that don't meet minimum size requirements.
+
+    Based on US IRC building code:
+    - Minimum 6.5 sq meters (70 sq ft)
+    - Minimum 2.13 meters (7 feet) in any dimension
+
+    We use grid-cell based thresholds that exceed these minimums.
+    """
+    penalty = 0.0
+
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type == "Bedroom":
+            width, height, area = get_room_dimensions(room_id, floorplan)
+
+            # Check minimum area
+            if area < MIN_BEDROOM_AREA_CELLS:
+                penalty -= 10.0  # Too small
+
+            # Check minimum dimension (both width and height should be adequate)
+            min_dim = min(width, height)
+            if min_dim < MIN_BEDROOM_DIMENSION_CELLS:
+                penalty -= 5.0  # Too narrow
+
+            # Bonus for well-sized bedrooms (at least 4 cells = ~36 sq m)
+            if area >= 4 and min_dim >= 2:
+                penalty += 1.0
+
+    return penalty
+
+
+def get_room_size_constraint_penalty(
+    room_spec: RoomSpec,
+    floorplan: np.ndarray,
+    cell_size_sqm: float = 3.6,  # Default: 1.9m scale squared
+) -> float:
+    """Penalty for rooms that are outside their target size constraints.
+
+    Uses the room_sizing module to evaluate if rooms are appropriately sized.
+
+    Args:
+        room_spec: The room specification
+        floorplan: The current floorplan grid
+        cell_size_sqm: Area of each grid cell in square meters
+    """
+    from procthor.generation.room_sizing import (
+        ROOM_SIZE_TARGETS_SQM,
+        get_room_size_penalty,
+        get_hallway_shape_penalty_for_dims,
+    )
+
+    penalty = 0.0
+
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type not in ROOM_SIZE_TARGETS_SQM:
+            continue
+
+        width, height, area_cells = get_room_dimensions(room_id, floorplan)
+        area_sqm = area_cells * cell_size_sqm
+
+        # Get size penalty
+        penalty += get_room_size_penalty(room_type, area_sqm, penalty_scale=0.05)
+
+        # Extra penalty for hallways that aren't narrow
+        if room_type == "Hallway":
+            # Convert cell dimensions to approximate meters
+            cell_side_m = cell_size_sqm ** 0.5
+            width_m = width * cell_side_m
+            height_m = height * cell_side_m
+            penalty += get_hallway_shape_penalty_for_dims(
+                min(width_m, height_m),
+                max(width_m, height_m),
+                penalty_scale=0.1
+            )
+
+    return penalty
+
+
+def score_floorplan(
+    room_spec: RoomSpec,
+    floorplan: np.ndarray,
+    cell_size_sqm: float = 3.6,
+) -> float:
+    """Calculate the quality of the floorplan based on the room specifications.
+
+    Args:
+        room_spec: The room specification
+        floorplan: The current floorplan grid
+        cell_size_sqm: Area of each grid cell in square meters (for size constraints)
+    """
+    score = 0.0
+
+    # Base score: how well do room sizes match the spec?
+    score += get_ratio_overlap_score(room_spec, floorplan)
+
+    # Rule 1: Bedrooms and bathrooms must be rectangular
+    score += get_rectangular_penalty(room_spec, floorplan)
+
+    # Rule 2: Hallways should be narrow (elongated, not square)
+    score += get_hallway_shape_penalty(room_spec, floorplan)
+
+    # Rule 3: Hallways must connect to LivingRoom
+    score += get_hallway_connectivity_penalty(room_spec, floorplan)
+
+    # Rule 4: Kitchen should be adjacent to LivingRoom
+    score += get_kitchen_livingroom_adjacency_bonus(room_spec, floorplan)
+
+    # Rule 5: Bathrooms should be smaller than bedrooms
+    score += get_bathroom_size_penalty(room_spec, floorplan)
+
+    # Rule 6: Bedrooms must connect to LivingRoom or Hallway
+    score += get_bedroom_connectivity_penalty(room_spec, floorplan)
+
+    # Rule 7: Bedrooms must meet minimum size requirements (US building code)
+    score += get_bedroom_size_penalty(room_spec, floorplan)
+
+    # Rule 8: Rooms should be within target size constraints
+    score += get_room_size_constraint_penalty(room_spec, floorplan, cell_size_sqm)
+
+    return score
+
+
+def validate_strict_rules(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
+    """Check if floorplan passes all strict layout rules.
+
+    Returns True if valid, False if any strict rule is violated.
+    """
+    adjacencies = get_room_adjacencies(floorplan)
+
+    for room_id, room_type in room_spec.room_type_map.items():
+        adjacent_ids = adjacencies.get(room_id, set())
+        adjacent_types = {room_spec.room_type_map.get(adj_id) for adj_id in adjacent_ids}
+
+        # Rule: Bedrooms must be rectangular
+        if room_type == "Bedroom":
+            if not is_room_rectangular(room_id, floorplan):
+                return False
+
+        # Rule: Bathrooms must be rectangular
+        if room_type == "Bathroom":
+            if not is_room_rectangular(room_id, floorplan):
+                return False
+
+        # Rule: Hallways must connect to LivingRoom
+        if room_type == "Hallway":
+            if "LivingRoom" not in adjacent_types:
+                return False
+
+        # Rule: Hallways must touch at least 2 rooms
+        if room_type == "Hallway":
+            if len(adjacent_ids) < 2:
+                return False
+
+        # Rule: Bedrooms must connect to LivingRoom or Hallway
+        if room_type == "Bedroom":
+            if not adjacent_types.intersection({"LivingRoom", "Hallway"}):
+                return False
+
+        # Rule: Bedrooms must meet minimum size
+        if room_type == "Bedroom":
+            width, height, area = get_room_dimensions(room_id, floorplan)
+            if area < MIN_BEDROOM_AREA_CELLS:
+                return False
+            if min(width, height) < MIN_BEDROOM_DIMENSION_CELLS:
+                return False
+
+    # Rule: At least one bathroom must be accessible from a public area
+    # (not only through bedrooms) - ensures a "guest bathroom" exists
+    bathrooms = [rid for rid, rtype in room_spec.room_type_map.items() if rtype == "Bathroom"]
+    if bathrooms:
+        has_public_bathroom = False
+        for bathroom_id in bathrooms:
+            adjacent_ids = adjacencies.get(bathroom_id, set())
+            adjacent_types = {room_spec.room_type_map.get(adj_id) for adj_id in adjacent_ids}
+            if adjacent_types.intersection({"LivingRoom", "Hallway", "Kitchen"}):
+                has_public_bathroom = True
+                break
+        if not has_public_bathroom:
+            return False
+
+    return True
 
 
 def recursively_expand_rooms(
@@ -448,6 +830,7 @@ def generate_floorplan(
     room_spec: np.ndarray,
     interior_boundary: np.ndarray,
     candidate_generations: int = 100,
+    interior_boundary_scale: float = 1.9,
 ) -> np.ndarray:
     """Generate a floorplan for the given room spec and interior boundary.
 
@@ -456,31 +839,48 @@ def generate_floorplan(
         interior_boundary: Interior boundary of the floorplan.
         candidate_generations: Number of candidate generations to generate. The
             best candidate floorplan is returned.
+        interior_boundary_scale: Scale factor (meters per grid cell) for size
+            constraint evaluation.
     """
+    # Calculate cell size in sqm for size constraint scoring
+    cell_size_sqm = interior_boundary_scale ** 2
+
     # NOTE: If there is only one room, the floorplan will always be the same.
     if len(room_spec.room_type_map) == 1:
         candidate_generations = 1
 
     best_floorplan = None
     best_score = float("-inf")
+    valid_candidates = 0
+
     for _ in range(candidate_generations):
         floorplan = interior_boundary.copy()
         try:
             recursively_expand_rooms(rooms=room_spec.spec, floorplan=floorplan)
         except InvalidFloorplan:
             continue
-        else:
-            score = score_floorplan(room_spec=room_spec, floorplan=floorplan)
-            if best_floorplan is None or score > best_score:
-                best_floorplan = floorplan
-                best_score = score
+
+        # Check strict rules - reject if any are violated
+        if not validate_strict_rules(room_spec=room_spec, floorplan=floorplan):
+            continue
+
+        valid_candidates += 1
+        score = score_floorplan(
+            room_spec=room_spec,
+            floorplan=floorplan,
+            cell_size_sqm=cell_size_sqm,
+        )
+        if best_floorplan is None or score > best_score:
+            best_floorplan = floorplan
+            best_score = score
 
     if best_floorplan is None:
         raise InvalidFloorplan(
             "Failed to generate a valid floorplan all candidate_generations="
             f"{candidate_generations} times from the interior boundary!"
             " This means the sampled interior boundary is too small for the room"
-            " spec. Try again with a another interior boundary.\n"
+            " spec, or the strict layout rules cannot be satisfied."
+            " Try again with another interior boundary.\n"
             f"interior_boundary:\n{interior_boundary}\n, room_spec:\n{room_spec}"
         )
 

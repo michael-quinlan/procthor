@@ -223,20 +223,40 @@ class HouseDict(TypedDict):
     walls: Optional[List[Wall]]
 
 
+VALID_ROOM_TYPES = {"Kitchen", "LivingRoom", "Bedroom", "Bathroom", "Hallway", None}
+"""Valid room types for LeafRoom."""
+
+PUBLIC_ROOM_TYPES = {"Kitchen", "LivingRoom", "Hallway"}
+"""Room types considered 'public' - good for circulation."""
+
+PRIVATE_ROOM_TYPES = {"Bedroom", "Bathroom"}
+"""Room types considered 'private' - should connect to public spaces."""
+
+
 class LeafRoom:
     def __init__(
         self,
         room_id: int,
         ratio: int,
-        room_type: Optional[Literal["Kitchen", "LivingRoom", "Bedroom", "Bathroom"]],
+        room_type: Optional[Literal["Kitchen", "LivingRoom", "Bedroom", "Bathroom", "Hallway"]],
         avoid_doors_from_metarooms: bool = False,
+        must_connect_to: Optional[set] = None,
+        cannot_connect_only_to: Optional[set] = None,
     ):
         """
         Parameters:
+        - room_id: Unique identifier for the room.
+        - ratio: Relative size of the room (higher = larger).
+        - room_type: Type of room.
         - avoid_doors_from_metarooms: prioritize having only 1 door, if possible.
           For example, bathrooms often only have 1 door.
+        - must_connect_to: Set of room types this room must be adjacent to.
+          E.g., {"LivingRoom", "Hallway"} means room must connect to at least one.
+        - cannot_connect_only_to: Set of room types this room cannot be ONLY connected to.
+          E.g., {"Bedroom", "Bathroom"} means room can't be accessible only through
+          bedrooms/bathrooms - it must also connect to another room type.
         """
-        assert room_type in {"Kitchen", "LivingRoom", "Bedroom", "Bathroom", None}
+        assert room_type in VALID_ROOM_TYPES, f"Invalid room_type: {room_type}"
         if room_id in {0, OUTDOOR_ROOM_ID}:
             raise Exception(f"room_id of 0 and {OUTDOOR_ROOM_ID} are reserved!")
 
@@ -244,6 +264,8 @@ class LeafRoom:
         self.room_id = room_id
         self.room_type = room_type
         self.ratio = ratio
+        self.must_connect_to = must_connect_to
+        self.cannot_connect_only_to = cannot_connect_only_to
 
     def __repr__(self):
         return (
