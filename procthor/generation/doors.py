@@ -133,38 +133,87 @@ def get_required_doors(
             if adjacent_living:
                 add_door(bedroom_id, random.choice(adjacent_living))
 
-    # Rule 2: Each bathroom gets exactly ONE door
-    # Priority: public room (hallway/living) > bedroom > any adjacent room
-    # At least one bathroom should have public access if possible
-    bathroom_has_public_door = False
-    for bathroom_id in bathrooms:
-        # Try public room first (hallway, living room, kitchen)
+    # Rule 2: Bathroom door placement with strict en-suite rules
+    # - First bathroom: prioritize public room (Hallway > LivingRoom > Kitchen)
+    # - Second bathroom (if present): MUST connect to exactly 1 bedroom (strict en-suite)
+    # - At least one bathroom must have public access
+
+    # Sort bathrooms to process in order - we'll assign the first one to public, second to en-suite
+    sorted_bathrooms = sorted(bathrooms)
+
+    for idx, bathroom_id in enumerate(sorted_bathrooms):
         adjacent_public = find_adjacent_of_type(bathroom_id, PUBLIC_ROOM_TYPES)
-        if adjacent_public:
-            add_door(bathroom_id, random.choice(adjacent_public))
-            bathroom_has_public_door = True
-            continue
-
-        # Try bedroom (en-suite)
         adjacent_bedrooms = find_adjacent_of_type(bathroom_id, {"Bedroom"})
-        if adjacent_bedrooms:
-            add_door(bathroom_id, random.choice(adjacent_bedrooms))
-            continue
 
-        # Fall back to any adjacent room
-        for r1, r2 in neighboring_rooms:
-            if r1 == bathroom_id and r2 in room_type_map:
-                add_door(bathroom_id, r2)
-                break
-            elif r2 == bathroom_id and r1 in room_type_map:
-                add_door(bathroom_id, r1)
-                break
+        if idx == 0:
+            # First bathroom: prioritize public room access
+            if adjacent_public:
+                # Priority order: Hallway > LivingRoom > Kitchen
+                hallways = [r for r in adjacent_public if room_type_map.get(r) == "Hallway"]
+                living_rooms = [r for r in adjacent_public if room_type_map.get(r) == "LivingRoom"]
+                kitchens = [r for r in adjacent_public if room_type_map.get(r) == "Kitchen"]
 
-    # Rule 3: Each hallway needs door to LivingRoom
+                if hallways:
+                    add_door(bathroom_id, random.choice(hallways))
+                elif living_rooms:
+                    add_door(bathroom_id, random.choice(living_rooms))
+                elif kitchens:
+                    add_door(bathroom_id, random.choice(kitchens))
+                continue
+
+            # Fall back: try bedroom if no public room adjacent
+            if adjacent_bedrooms:
+                add_door(bathroom_id, random.choice(adjacent_bedrooms))
+                continue
+
+            # Last resort: any adjacent room
+            for r1, r2 in neighboring_rooms:
+                if r1 == bathroom_id and r2 in room_type_map:
+                    add_door(bathroom_id, r2)
+                    break
+                elif r2 == bathroom_id and r1 in room_type_map:
+                    add_door(bathroom_id, r1)
+                    break
+        else:
+            # Second+ bathroom: MUST be strict en-suite (exactly 1 door to exactly 1 bedroom)
+            if adjacent_bedrooms:
+                # Connect to exactly one bedroom - strict en-suite
+                add_door(bathroom_id, random.choice(adjacent_bedrooms))
+                continue
+
+            # If no adjacent bedrooms, fall back to public room (not ideal but valid)
+            if adjacent_public:
+                hallways = [r for r in adjacent_public if room_type_map.get(r) == "Hallway"]
+                living_rooms = [r for r in adjacent_public if room_type_map.get(r) == "LivingRoom"]
+                kitchens = [r for r in adjacent_public if room_type_map.get(r) == "Kitchen"]
+
+                if hallways:
+                    add_door(bathroom_id, random.choice(hallways))
+                elif living_rooms:
+                    add_door(bathroom_id, random.choice(living_rooms))
+                elif kitchens:
+                    add_door(bathroom_id, random.choice(kitchens))
+                continue
+
+            # Last resort: any adjacent room
+            for r1, r2 in neighboring_rooms:
+                if r1 == bathroom_id and r2 in room_type_map:
+                    add_door(bathroom_id, r2)
+                    break
+                elif r2 == bathroom_id and r1 in room_type_map:
+                    add_door(bathroom_id, r1)
+                    break
+
+    # Rule 3: Each hallway needs door to LivingRoom (preferred) or Kitchen (fallback)
     for hallway_id in hallways:
         adjacent_living = find_adjacent_of_type(hallway_id, {"LivingRoom"})
         if adjacent_living:
             add_door(hallway_id, random.choice(adjacent_living))
+        else:
+            # Fallback to Kitchen if no LivingRoom available
+            adjacent_kitchen = find_adjacent_of_type(hallway_id, {"Kitchen"})
+            if adjacent_kitchen:
+                add_door(hallway_id, random.choice(adjacent_kitchen))
 
     # Rule 4: Hallways need at least 2 doors - add more if needed
     for hallway_id in hallways:
