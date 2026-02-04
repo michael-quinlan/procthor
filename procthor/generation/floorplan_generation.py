@@ -661,6 +661,38 @@ def get_bedroom_size_penalty(room_spec: RoomSpec, floorplan: np.ndarray) -> floa
     return penalty
 
 
+# Bedroom aspect ratio constraints
+# Bedrooms should not be too square (1:1) or too elongated (1:2+)
+# Valid range: 1.2 to 1.5 aspect ratio
+MIN_BEDROOM_ASPECT_RATIO = 1.2
+MAX_BEDROOM_ASPECT_RATIO = 1.5
+
+
+def get_bedroom_aspect_ratio_penalty(room_spec: RoomSpec, floorplan: np.ndarray) -> float:
+    """Penalty for bedrooms with poor aspect ratios.
+
+    Bedrooms should have a 1:1.2 to 1:1.5 aspect ratio.
+    - Too square (< 1.2): penalized
+    - Too elongated (> 1.5): penalized
+    - Good ratio (1.2 to 1.5): rewarded
+    """
+    penalty = 0.0
+
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type == "Bedroom":
+            width, height, area = get_room_dimensions(room_id, floorplan)
+            if width > 0 and height > 0:
+                aspect_ratio = max(width, height) / min(width, height)
+                if aspect_ratio < MIN_BEDROOM_ASPECT_RATIO:
+                    penalty -= 5.0  # Too square
+                elif aspect_ratio > MAX_BEDROOM_ASPECT_RATIO:
+                    penalty -= 5.0  # Too elongated
+                else:
+                    penalty += 1.0  # Good ratio
+
+    return penalty
+
+
 def get_room_size_constraint_penalty(
     room_spec: RoomSpec,
     floorplan: np.ndarray,
@@ -748,6 +780,9 @@ def score_floorplan(
 
     # Rule 8: Rooms should be within target size constraints
     score += get_room_size_constraint_penalty(room_spec, floorplan, cell_size_sqm)
+
+    # Rule 9: Bedrooms should have good aspect ratios (1.2 to 1.5)
+    score += get_bedroom_aspect_ratio_penalty(room_spec, floorplan)
 
     return score
 
