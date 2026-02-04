@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from procthor.generation import HouseGenerator
-from procthor.generation.hallway_room_specs import HALLWAY_ROOM_SPEC_SAMPLER
+from procthor.generation.hallway_room_specs import ALL_ROOM_SPEC_SAMPLER
 
 # Room type colors (from generate_samples.py)
 ROOM_TYPE_TO_COLOR = {
@@ -185,7 +185,7 @@ def generate_houses(
     house_generator = HouseGenerator(
         split=split,
         seed=seed,
-        room_spec_sampler=HALLWAY_ROOM_SPEC_SAMPLER,
+        room_spec_sampler=ALL_ROOM_SPEC_SAMPLER,
     )
 
     # Create image directory if needed
@@ -201,7 +201,7 @@ def generate_houses(
             # Sample spec ONCE per house slot to avoid bias toward smaller houses
             # (larger houses fail more often, and without this fix each retry
             # would sample a new spec, biasing toward specs that succeed quickly)
-            target_spec = HALLWAY_ROOM_SPEC_SAMPLER.sample()
+            target_spec = ALL_ROOM_SPEC_SAMPLER.sample()
             house_generator.room_spec = target_spec
 
             retries = 0

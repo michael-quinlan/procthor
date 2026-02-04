@@ -332,3 +332,18 @@ NO_HALLWAY_ROOM_SPEC_SAMPLER = RoomSpecSampler(
         NO_HALLWAY_2BR_1BA,
     ]
 )
+
+
+# Combined sampler with all room specs (hallway + no-hallway)
+# Includes all 5 specs: 2BR/3BR/4BR hallway + 1BR/2BR no-hallway
+ALL_ROOM_SPEC_SAMPLER = RoomSpecSampler(
+    [
+        # Hallway specs (larger houses)
+        HALLWAY_HOUSE_2BR_1BA,
+        HALLWAY_HOUSE_3BR_2BA,
+        HALLWAY_HOUSE_4BR_2BA,
+        # No-hallway specs (smaller houses)
+        NO_HALLWAY_1BR_1BA,
+        NO_HALLWAY_2BR_1BA,
+    ]
+)
