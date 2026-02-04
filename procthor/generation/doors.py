@@ -133,12 +133,18 @@ def get_required_doors(
                 add_door(bedroom_id, random.choice(adjacent_living))
 
     # Rule 2: Each bathroom gets exactly ONE door
-    # Priority: public room (hallway/living) > bedroom > any adjacent room
+    # Priority: LivingRoom/Hallway (hall bath) > Kitchen > Bedroom (en-suite) > any
     for bathroom_id in bathrooms:
-        # Try public room first (hallway, living room, kitchen)
-        adjacent_public = find_adjacent_of_type(bathroom_id, PUBLIC_ROOM_TYPES)
-        if adjacent_public:
-            add_door(bathroom_id, random.choice(adjacent_public))
+        # Try LivingRoom or Hallway first (preferred for hall bath)
+        adjacent_hall_bath = find_adjacent_of_type(bathroom_id, {"LivingRoom", "Hallway"})
+        if adjacent_hall_bath:
+            add_door(bathroom_id, random.choice(adjacent_hall_bath))
+            continue
+
+        # Try Kitchen (acceptable but not preferred)
+        adjacent_kitchen = find_adjacent_of_type(bathroom_id, {"Kitchen"})
+        if adjacent_kitchen:
+            add_door(bathroom_id, random.choice(adjacent_kitchen))
             continue
 
         # Try bedroom (en-suite)
