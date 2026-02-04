@@ -20,6 +20,23 @@ from procthor.generation.room_sizing import (
 DEFAULT_INTERIOR_SCALE = 1.9
 
 
+def _calculate_hallway_ratio(num_bedrooms: int) -> float:
+    """Calculate hallway ratio based on house size.
+
+    Formula: hallway_ratio = 2 + (num_bedrooms - 1) * 0.67, clamped to [2, 4]
+    - Small houses (1-2 BR): ratio ~2
+    - Large houses (3-4 BR): ratio ~4
+
+    Args:
+        num_bedrooms: Number of bedrooms in the house
+
+    Returns:
+        Hallway ratio value between 2 and 4
+    """
+    ratio = 2 + (num_bedrooms - 1) * 0.67
+    return max(2.0, min(4.0, ratio))
+
+
 def create_hallway_room_spec(
     room_spec_id: str,
     num_bedrooms: int = 2,
@@ -36,7 +53,7 @@ def create_hallway_room_spec(
     - Private zone: Bedrooms + Bathroom off the hallway
 
     Room sizes are automatically calculated based on realistic targets
-    from the room_sizing module.
+    from the room_sizing module. Hallway ratio scales with house size.
 
     Args:
         room_spec_id: Unique ID for this room spec
@@ -61,6 +78,9 @@ def create_hallway_room_spec(
 
     # Get target-based ratios
     ratios = calculate_ratios_from_targets(room_type_counts)
+
+    # Override hallway ratio based on house size (scales with num_bedrooms)
+    ratios["Hallway"] = _calculate_hallway_ratio(num_bedrooms)
 
     # Auto-calculate dims if not provided
     if dims is None:
@@ -91,7 +111,7 @@ def create_hallway_room_spec(
     public_zone_ratio = ratios["Kitchen"] + ratios["LivingRoom"]
     public_zone = MetaRoom(ratio=public_zone_ratio, children=[kitchen, living_room])
 
-    # Hallway: Central circulation space
+    # Hallway: Central circulation space (ratio scales with house size)
     hallway = LeafRoom(
         room_id=room_id,
         ratio=ratios["Hallway"],
@@ -143,6 +163,120 @@ def create_hallway_room_spec(
     )
 
 
+def create_no_hallway_room_spec(
+    room_spec_id: str,
+    num_bedrooms: int = 1,
+    num_bathrooms: int = 1,
+    dims: Optional[Tuple[int, int]] = None,
+    interior_boundary_scale: float = DEFAULT_INTERIOR_SCALE,
+    size_preference: str = "target",
+) -> RoomSpec:
+    """Create a RoomSpec without a hallway for smaller houses.
+
+    Layout concept:
+    - Public zone: Kitchen + LivingRoom (open plan)
+    - Private zone: Bedrooms + Bathroom connecting to LivingRoom
+    - No hallway - bedrooms connect directly to LivingRoom
+
+    Room sizes are automatically calculated based on realistic targets
+    from the room_sizing module.
+
+    Args:
+        room_spec_id: Unique ID for this room spec
+        num_bedrooms: Number of bedrooms (1-2 recommended)
+        num_bathrooms: Number of bathrooms (1-2)
+        dims: Optional house dimensions as (x, z) in grid units.
+              If None, calculated automatically from target room sizes.
+        interior_boundary_scale: Meters per grid cell for size calculation
+        size_preference: "min", "target", or "max" for room sizing
+
+    Returns:
+        RoomSpec object
+    """
+    # Count rooms by type for auto-sizing (no Hallway)
+    room_type_counts = {
+        "Kitchen": 1,
+        "LivingRoom": 1,
+        "Bedroom": num_bedrooms,
+        "Bathroom": num_bathrooms,
+    }
+
+    # Get target-based ratios
+    ratios = calculate_ratios_from_targets(room_type_counts)
+
+    # Auto-calculate dims if not provided
+    if dims is None:
+        dims = calculate_dims_for_house(
+            room_type_counts,
+            interior_boundary_scale,
+            size_preference,
+        )
+
+    room_id = 2  # 0 and 1 are reserved
+
+    # Public zone: Kitchen and LivingRoom (can connect to each other)
+    kitchen = LeafRoom(
+        room_id=room_id,
+        ratio=ratios["Kitchen"],
+        room_type="Kitchen",
+    )
+    room_id += 1
+
+    living_room = LeafRoom(
+        room_id=room_id,
+        ratio=ratios["LivingRoom"],
+        room_type="LivingRoom",
+    )
+    room_id += 1
+
+    # Public zone ratio is sum of kitchen + living room
+    public_zone_ratio = ratios["Kitchen"] + ratios["LivingRoom"]
+    public_zone = MetaRoom(ratio=public_zone_ratio, children=[kitchen, living_room])
+
+    # Private rooms: Bedrooms and bathrooms (connect to LivingRoom, no hallway)
+    private_rooms = []
+    private_zone_ratio = 0
+
+    for i in range(num_bedrooms):
+        bedroom = LeafRoom(
+            room_id=room_id,
+            ratio=ratios["Bedroom"],
+            room_type="Bedroom",
+            cannot_connect_only_to={"Bedroom", "Bathroom"},
+            must_connect_to={"LivingRoom"},  # Connect to LivingRoom since no hallway
+        )
+        private_rooms.append(bedroom)
+        private_zone_ratio += ratios["Bedroom"]
+        room_id += 1
+
+    for i in range(num_bathrooms):
+        bathroom = LeafRoom(
+            room_id=room_id,
+            ratio=ratios["Bathroom"],
+            room_type="Bathroom",
+            avoid_doors_from_metarooms=True,
+        )
+        private_rooms.append(bathroom)
+        private_zone_ratio += ratios["Bathroom"]
+        room_id += 1
+
+    private_zone = MetaRoom(ratio=private_zone_ratio, children=private_rooms)
+
+    # Combine: Public and private zones directly (no hallway)
+    total_ratio = public_zone_ratio + private_zone_ratio
+    house = MetaRoom(ratio=total_ratio, children=[public_zone, private_zone])
+
+    # Capture dims for closure
+    final_dims = dims
+
+    return RoomSpec(
+        room_spec_id=room_spec_id,
+        sampling_weight=1,
+        spec=[house],
+        dims=lambda: final_dims,
+    )
+
+
 # Pre-defined specs for common house layouts (with auto-calculated dims)
 # dims=None means dimensions are calculated automatically from target room sizes
 HALLWAY_HOUSE_2BR_1BA = create_hallway_room_spec(
@@ -174,3 +308,27 @@ HALLWAY_ROOM_SPEC_SAMPLER = RoomSpecSampler(
     ]
 )
 
+
+# Pre-defined no-hallway specs for smaller houses
+# These are ideal for 1-2 bedroom layouts without circulation space
+NO_HALLWAY_1BR_1BA = create_no_hallway_room_spec(
+    "no-hallway-1br-1ba",
+    num_bedrooms=1,
+    num_bathrooms=1,
+    dims=None,  # Auto-calculate
+)
+NO_HALLWAY_2BR_1BA = create_no_hallway_room_spec(
+    "no-hallway-2br-1ba",
+    num_bedrooms=2,
+    num_bathrooms=1,
+    dims=None,  # Auto-calculate
+)
+
+
+# RoomSpecSampler for no-hallway house layouts
+NO_HALLWAY_ROOM_SPEC_SAMPLER = RoomSpecSampler(
+    [
+        NO_HALLWAY_1BR_1BA,
+        NO_HALLWAY_2BR_1BA,
+    ]
+)
