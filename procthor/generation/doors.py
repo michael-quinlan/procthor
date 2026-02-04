@@ -280,13 +280,13 @@ def get_required_doors(
                     if non_kitchen:
                         add_door(room_id, random.choice(non_kitchen))
                         logging.debug(f"Added fallback door for {room_type} {room_id} (avoiding Kitchen)")
-                    elif all_adjacent:
-                        # Only Kitchen is adjacent - bedroom constraint violation
-                        logging.warning(
-                            f"Bedroom {room_id} forced to connect to Kitchen - "
-                            "no other adjacent rooms available"
+                    else:
+                        # Only Kitchen is adjacent - skip adding door
+                        # The room will fail "all rooms must have doors" validation later
+                        logging.debug(
+                            f"Bedroom {room_id} only adjacent to Kitchen - "
+                            "skipping door (floorplan will be rejected)"
                         )
-                        add_door(room_id, random.choice(all_adjacent))
                 else:
                     add_door(room_id, random.choice(all_adjacent))
                     logging.debug(f"Added fallback door for {room_type} {room_id}")
@@ -323,15 +323,29 @@ def default_add_doors(
         room_spec=room_spec,
     )
 
+    # Filter required_doors to remove any bedroom-kitchen doors
+    # (should not happen normally, but ensure constraint is enforced)
+    filtered_required_doors = []
+    for door in required_doors:
+        room1_type = room_spec.room_type_map.get(door[0])
+        room2_type = room_spec.room_type_map.get(door[1])
+        if (room1_type == "Bedroom" and room2_type == "Kitchen") or \
+           (room1_type == "Kitchen" and room2_type == "Bedroom"):
+            logging.debug(
+                f"Filtering out bedroom-kitchen door from required_doors: {door}"
+            )
+            continue
+        filtered_required_doors.append(door)
+
     # Track which bathrooms already have a door
     bathrooms_with_doors = set()
-    for door in required_doors:
+    for door in filtered_required_doors:
         for room_id in door:
             if room_spec.room_type_map.get(room_id) == "Bathroom":
                 bathrooms_with_doors.add(room_id)
 
     # Combine: required doors + hierarchy doors (avoiding duplicates and forbidden connections)
-    all_openings = list(required_doors)
+    all_openings = list(filtered_required_doors)
     for opening in hierarchy_openings:
         if opening not in all_openings:
             room1_type = room_spec.room_type_map.get(opening[0])
