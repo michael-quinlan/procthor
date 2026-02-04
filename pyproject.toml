@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "procthor"
+version = "0.0.1.dev0"
+description = "ProcTHOR: Large-Scale Embodied AI Using Procedural Generation"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    {name = "Matt Deitke", email = "mattd@allenai.org"},
+]
+license = {text = "Apache-2.0"}
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Development Status :: 1 - Planning",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+dependencies = [
+    "numpy",
+    "matplotlib",
+    "trimesh",
+    "python-sat",
+    "python-fcl",
+    "canonicaljson",
+    "tqdm",
+    "ai2thor",
+    "attrs",
+    "shapely",
+    "moviepy",
+    "pandas",
+    "networkx",
+    "scipy",
+]
+
+[project.urls]
+Homepage = "https://procthor.allenai.org/"
+
+[tool.uv]
+# UV configuration - uses requires-python from project section
+
+[tool.setuptools]
+packages = ["procthor"]
+
+[tool.setuptools.package-data]
+procthor = ["databases/*.json", "databases/asset_groups/*.json"]
+

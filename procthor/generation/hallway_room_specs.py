@@ -8,7 +8,7 @@ These specs ensure:
 """
 from typing import Optional, Tuple
 from procthor.utils.types import LeafRoom, MetaRoom, PUBLIC_ROOM_TYPES, PRIVATE_ROOM_TYPES
-from procthor.generation.room_specs import RoomSpec
+from procthor.generation.room_specs import RoomSpec, RoomSpecSampler
 from procthor.generation.room_sizing import (
     calculate_dims_for_house,
     calculate_ratios_from_targets,
@@ -165,10 +165,12 @@ HALLWAY_HOUSE_4BR_2BA = create_hallway_room_spec(
 )
 
 
-# Dict mapping name to RoomSpec
-HALLWAY_ROOM_SPEC_SAMPLER = {
-    "2br-1ba": HALLWAY_HOUSE_2BR_1BA,
-    "3br-2ba": HALLWAY_HOUSE_3BR_2BA,
-    "4br-2ba": HALLWAY_HOUSE_4BR_2BA,
-}
+# RoomSpecSampler for hallway-based house layouts
+HALLWAY_ROOM_SPEC_SAMPLER = RoomSpecSampler(
+    [
+        HALLWAY_HOUSE_2BR_1BA,
+        HALLWAY_HOUSE_3BR_2BA,
+        HALLWAY_HOUSE_4BR_2BA,
+    ]
+)
 
