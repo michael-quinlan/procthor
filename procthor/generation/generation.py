@@ -14,7 +14,7 @@ from procthor.utils.types import (
     XZPoly,
 )
 from .ceiling_height import sample_ceiling_height
-from .floorplan_generation import generate_floorplan
+from .floorplan_generation import generate_floorplan, incremental_generate_floorplan
 from .house import HouseStructure, PartialHouse
 from .interior_boundaries import sample_interior_boundary, DEFAULT_AVERAGE_ROOM_SIZE
 from .room_specs import RoomSpec
@@ -195,11 +195,26 @@ def default_sample_house_structure(
             average_room_size=average_room_size,
             dims=None if room_spec.dims is None else room_spec.dims(),
         )
-    floorplan = generate_floorplan(
-        room_spec=room_spec,
-        interior_boundary=interior_boundary,
-        interior_boundary_scale=interior_boundary_scale,
+
+    # Count bedrooms to decide which generator to use
+    num_bedrooms = sum(
+        1 for room_type in room_spec.room_type_map.values() if room_type == "Bedroom"
     )
+
+    # Use incremental generator for 3+ bedroom houses
+    # (larger houses benefit from the incremental placement approach)
+    if num_bedrooms >= 3:
+        floorplan = incremental_generate_floorplan(
+            room_spec=room_spec,
+            interior_boundary=interior_boundary,
+            interior_boundary_scale=interior_boundary_scale,
+        )
+    else:
+        floorplan = generate_floorplan(
+            room_spec=room_spec,
+            interior_boundary=interior_boundary,
+            interior_boundary_scale=interior_boundary_scale,
+        )
 
     # NOTE: Pad the floorplan with the outdoor room id to make
     # it easier to find walls.

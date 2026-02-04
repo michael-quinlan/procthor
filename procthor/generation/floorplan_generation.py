@@ -15,7 +15,7 @@ Things to consider:
       the necessary door(s).
 """
 import random
-from typing import Dict, Sequence, Union
+from typing import Dict, Optional, Sequence, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -874,6 +874,542 @@ def recursively_expand_rooms(
                 room.children,
                 floorplan[room.min_y : room.max_y, room.min_x : room.max_x],
             )
+
+
+def incremental_generate_floorplan(
+    room_spec: RoomSpec,
+    interior_boundary: np.ndarray,
+    candidate_generations: int = 1,
+    interior_boundary_scale: float = 1.9,
+) -> np.ndarray:
+    """Generate floorplan by placing rooms one at a time.
+
+    Places rooms in order: LivingRoom -> Kitchen -> Hallway -> Bedrooms/Bathrooms.
+    This approach works better for 3+ bedroom houses where the hierarchical
+    MetaRoom approach struggles to converge.
+
+    Args:
+        room_spec: Room spec for the floorplan.
+        interior_boundary: Interior boundary of the floorplan.
+        candidate_generations: Number of candidate generations to try.
+        interior_boundary_scale: Scale factor (meters per grid cell).
+
+    Returns:
+        The generated floorplan as a numpy array.
+
+    Raises:
+        InvalidFloorplan: If unable to generate a valid floorplan.
+    """
+    cell_size_sqm = interior_boundary_scale ** 2
+
+    # Classify rooms by type
+    living_rooms = []
+    kitchens = []
+    hallways = []
+    bedrooms = []
+    bathrooms = []
+
+    for room_id, room_type in room_spec.room_type_map.items():
+        room = room_spec.room_map[room_id]
+        if room_type == "LivingRoom":
+            living_rooms.append(room)
+        elif room_type == "Kitchen":
+            kitchens.append(room)
+        elif room_type == "Hallway":
+            hallways.append(room)
+        elif room_type == "Bedroom":
+            bedrooms.append(room)
+        elif room_type == "Bathroom":
+            bathrooms.append(room)
+
+    # Order rooms for placement: LivingRoom first, Kitchen, Hallway, then private rooms
+    # Interleave bedrooms and bathrooms to ensure bathrooms have space adjacent to bedrooms
+    private_rooms = []
+    bedroom_iter = iter(bedrooms)
+    bathroom_iter = iter(bathrooms)
+
+    # Place bedrooms and bathrooms in pairs when possible
+    for i in range(max(len(bedrooms), len(bathrooms))):
+        try:
+            private_rooms.append(next(bedroom_iter))
+        except StopIteration:
+            pass
+        # Add a bathroom after every 2 bedrooms or when we've placed all bedrooms
+        if (i + 1) % 2 == 0 or i >= len(bedrooms) - 1:
+            try:
+                private_rooms.append(next(bathroom_iter))
+            except StopIteration:
+                pass
+    # Add any remaining bathrooms
+    for bathroom in bathroom_iter:
+        private_rooms.append(bathroom)
+
+    placement_order = living_rooms + kitchens + hallways + private_rooms
+
+    best_floorplan = None
+    best_score = float("-inf")
+
+    for _ in range(candidate_generations):
+        floorplan = interior_boundary.copy()
+        success = True
+
+        # Reset room boundaries for this attempt
+        for room in placement_order:
+            room.min_x = None
+            room.max_x = None
+            room.min_y = None
+            room.max_y = None
+
+        # Place rooms one at a time
+        placed_rooms = []
+        for room in placement_order:
+            room_type = room_spec.room_type_map[room.room_id]
+
+            try:
+                _place_room_incrementally(
+                    room=room,
+                    room_type=room_type,
+                    floorplan=floorplan,
+                    placed_rooms=placed_rooms,
+                    room_spec=room_spec,
+                )
+                placed_rooms.append(room)
+            except InvalidFloorplan:
+                success = False
+                break
+
+        if not success:
+            continue
+
+        # Fill remaining empty space - use rectangular growth for bedrooms/bathrooms
+        _fill_empty_space(floorplan, placed_rooms, room_spec=room_spec)
+
+        # Check strict rules
+        if not validate_strict_rules(room_spec=room_spec, floorplan=floorplan):
+            continue
+
+        score = score_floorplan(
+            room_spec=room_spec,
+            floorplan=floorplan,
+            cell_size_sqm=cell_size_sqm,
+        )
+
+        if best_floorplan is None or score > best_score:
+            best_floorplan = floorplan
+            best_score = score
+
+    if best_floorplan is None:
+        # Debug info for diagnosis
+        import logging
+        logging.debug(
+            f"Incremental generation failed. Stats: attempts={candidate_generations}, "
+            f"rooms={list(room_spec.room_type_map.values())}"
+        )
+        raise InvalidFloorplan(
+            "Failed to generate valid floorplan using incremental approach after "
+            f"{candidate_generations} attempts."
+        )
+
+    return best_floorplan
+
+
+def _find_adjacent_empty_region(
+    floorplan: np.ndarray,
+    target_room_id: int,
+    min_size: int = 2,
+    min_dim: int = 1,
+) -> tuple:
+    """Find an empty region adjacent to the target room.
+
+    Args:
+        floorplan: The current floorplan grid.
+        target_room_id: The room to find space adjacent to.
+        min_size: Minimum total cells (w * h >= min_size).
+        min_dim: Minimum dimension in each direction (min(w, h) >= min_dim).
+
+    Returns (start_row, start_col, width, height) as Python ints, or None if no suitable region found.
+    """
+    rows, cols = int(floorplan.shape[0]), int(floorplan.shape[1])
+
+    # Find all cells adjacent to the target room
+    target_mask = floorplan == target_room_id
+    candidates = []
+
+    for r in range(rows):
+        for c in range(cols):
+            if floorplan[r, c] != EMPTY_ROOM_ID:
+                continue
+
+            # Check if adjacent to target room
+            is_adjacent = False
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols:
+                    if target_mask[nr, nc]:
+                        is_adjacent = True
+                        break
+
+            if is_adjacent:
+                # Try to find a rectangular region starting from this cell
+                for w in range(min_dim, cols - c + 1):
+                    for h in range(min_dim, rows - r + 1):
+                        region = floorplan[r:r+h, c:c+w]
+                        if (region == EMPTY_ROOM_ID).all():
+                            if w * h >= min_size and min(w, h) >= min_dim:
+                                candidates.append((int(r), int(c), int(w), int(h), int(w * h)))
+
+    if not candidates:
+        return None
+
+    # Return a random candidate, weighted by size
+    random.shuffle(candidates)
+    candidates.sort(key=lambda x: x[4], reverse=True)
+    # Pick from top candidates
+    top_n = min(5, len(candidates))
+    choice = random.choice(candidates[:top_n])
+    return (int(choice[0]), int(choice[1]), int(choice[2]), int(choice[3]))
+
+
+def _find_empty_region(
+    floorplan: np.ndarray,
+    min_size: int = 4,
+    prefer_center: bool = True,
+    min_dim: int = 1,
+) -> tuple:
+    """Find an empty rectangular region in the floorplan.
+
+    Args:
+        floorplan: The current floorplan grid.
+        min_size: Minimum total cells (w * h >= min_size).
+        prefer_center: If True, prefer regions closer to center.
+        min_dim: Minimum dimension in each direction (min(w, h) >= min_dim).
+
+    Returns (start_row, start_col, width, height) as Python ints, or None if no suitable region found.
+    """
+    rows, cols = int(floorplan.shape[0]), int(floorplan.shape[1])
+    center_r, center_c = rows // 2, cols // 2
+
+    candidates = []
+
+    for r in range(rows):
+        for c in range(cols):
+            if floorplan[r, c] != EMPTY_ROOM_ID:
+                continue
+
+            # Find largest rectangle starting from this cell
+            for w in range(min_dim, cols - c + 1):
+                for h in range(min_dim, rows - r + 1):
+                    region = floorplan[r:r+h, c:c+w]
+                    if (region == EMPTY_ROOM_ID).all():
+                        if w * h >= min_size and min(w, h) >= min_dim:
+                            # Calculate distance from center for weighting
+                            dist = abs(r + h/2 - center_r) + abs(c + w/2 - center_c)
+                            candidates.append((int(r), int(c), int(w), int(h), int(w * h), dist))
+
+    if not candidates:
+        return None
+
+    if prefer_center:
+        # Sort by distance to center (ascending) then size (descending)
+        candidates.sort(key=lambda x: (x[5], -x[4]))
+    else:
+        random.shuffle(candidates)
+        candidates.sort(key=lambda x: x[4], reverse=True)
+
+    # Pick from top candidates with some randomization
+    top_n = min(3, len(candidates))
+    choice = random.choice(candidates[:top_n])
+    return (int(choice[0]), int(choice[1]), int(choice[2]), int(choice[3]))
+
+
+def _place_room_incrementally(
+    room,
+    room_type: str,
+    floorplan: np.ndarray,
+    placed_rooms: list,
+    room_spec: RoomSpec,
+) -> None:
+    """Place a single room in the floorplan.
+
+    LivingRooms are placed near center.
+    Kitchens are placed adjacent to LivingRoom.
+    Hallways are placed as narrow corridors.
+    Bedrooms are placed adjacent to Hallway or LivingRoom.
+    Bathrooms are placed adjacent to Bedrooms (en-suite) or public areas.
+    """
+
+    # Find where to place this room based on type
+    if room_type == "LivingRoom":
+        # First LivingRoom goes near center
+        if not placed_rooms:
+            region = _find_empty_region(floorplan, min_size=4, prefer_center=True)
+        else:
+            # Additional LivingRooms go adjacent to existing ones
+            existing_living = [r for r in placed_rooms
+                             if room_spec.room_type_map.get(r.room_id) == "LivingRoom"]
+            if existing_living:
+                region = _find_adjacent_empty_region(
+                    floorplan, existing_living[0].room_id, min_size=3
+                )
+            else:
+                region = _find_empty_region(floorplan, min_size=3, prefer_center=True)
+
+    elif room_type == "Kitchen":
+        # Kitchen goes adjacent to LivingRoom
+        living_rooms = [r for r in placed_rooms
+                       if room_spec.room_type_map.get(r.room_id) == "LivingRoom"]
+        if living_rooms:
+            region = _find_adjacent_empty_region(
+                floorplan, living_rooms[0].room_id, min_size=3
+            )
+        else:
+            region = _find_empty_region(floorplan, min_size=3, prefer_center=False)
+
+    elif room_type == "Hallway":
+        # Hallway should connect public to private areas
+        # Place adjacent to LivingRoom or Kitchen
+        public_rooms = [r for r in placed_rooms
+                       if room_spec.room_type_map.get(r.room_id) in {"LivingRoom", "Kitchen"}]
+        if public_rooms:
+            region = _find_adjacent_empty_region(
+                floorplan, random.choice(public_rooms).room_id, min_size=2
+            )
+        else:
+            region = _find_empty_region(floorplan, min_size=2, prefer_center=False)
+
+    elif room_type == "Bedroom":
+        # Try multiple placement strategies in order of preference:
+        # 1. Adjacent to Hallway (if exists)
+        # 2. Grow hallway to create space
+        # 3. Adjacent to LivingRoom
+        # 4. Grow LivingRoom to create space
+        # 5. Any empty region
+        # Bedrooms require min 2x2 dimensions to pass validation
+        region = None
+
+        hallways = [r for r in placed_rooms
+                   if room_spec.room_type_map.get(r.room_id) == "Hallway"]
+        living_rooms = [r for r in placed_rooms
+                      if room_spec.room_type_map.get(r.room_id) == "LivingRoom"]
+
+        # Try adjacent to hallway first
+        if hallways and region is None:
+            region = _find_adjacent_empty_region(
+                floorplan, hallways[0].room_id, min_size=4, min_dim=MIN_BEDROOM_DIMENSION_CELLS
+            )
+
+        # If no space adjacent to hallway, grow the hallway into empty space first
+        if region is None and hallways:
+            hallway = hallways[0]
+            for _ in range(3):
+                grew = grow_rect(hallway, floorplan)
+                if grew:
+                    region = _find_adjacent_empty_region(
+                        floorplan, hallway.room_id, min_size=4, min_dim=MIN_BEDROOM_DIMENSION_CELLS
+                    )
+                    if region is not None:
+                        break
+                else:
+                    break
+
+        # Try adjacent to living room
+        if region is None and living_rooms:
+            # Try all living rooms
+            for lr in living_rooms:
+                region = _find_adjacent_empty_region(
+                    floorplan, lr.room_id, min_size=4, min_dim=MIN_BEDROOM_DIMENSION_CELLS
+                )
+                if region is not None:
+                    break
+
+        # If no space adjacent to living room, grow it into empty space
+        if region is None and living_rooms:
+            for lr in living_rooms:
+                for _ in range(3):
+                    grew = grow_rect(lr, floorplan)
+                    if grew:
+                        region = _find_adjacent_empty_region(
+                            floorplan, lr.room_id, min_size=4, min_dim=MIN_BEDROOM_DIMENSION_CELLS
+                        )
+                        if region is not None:
+                            break
+                    else:
+                        break
+                if region is not None:
+                    break
+
+        if region is None:
+            region = _find_empty_region(floorplan, min_size=4, prefer_center=False, min_dim=MIN_BEDROOM_DIMENSION_CELLS)
+
+    elif room_type == "Bathroom":
+        # First bathroom: place adjacent to public area (LivingRoom/Kitchen/Hallway)
+        # Subsequent bathrooms: place adjacent to a bedroom (en-suite)
+        bathrooms_placed = [r for r in placed_rooms
+                          if room_spec.room_type_map.get(r.room_id) == "Bathroom"]
+
+        if not bathrooms_placed:
+            # First bathroom - needs public access
+            public_rooms = [r for r in placed_rooms
+                          if room_spec.room_type_map.get(r.room_id) in
+                          {"LivingRoom", "Kitchen", "Hallway"}]
+            if public_rooms:
+                region = _find_adjacent_empty_region(
+                    floorplan, random.choice(public_rooms).room_id, min_size=2
+                )
+            else:
+                region = _find_empty_region(floorplan, min_size=2, prefer_center=False)
+        else:
+            # En-suite bathroom - adjacent to bedroom
+            bedrooms = [r for r in placed_rooms
+                       if room_spec.room_type_map.get(r.room_id) == "Bedroom"]
+            # Find bedrooms that don't already have a connected bathroom
+            available_bedrooms = []
+            for bedroom in bedrooms:
+                has_bathroom = False
+                for bathroom in bathrooms_placed:
+                    if _rooms_adjacent(bedroom.room_id, bathroom.room_id, floorplan):
+                        has_bathroom = True
+                        break
+                if not has_bathroom:
+                    available_bedrooms.append(bedroom)
+
+            if available_bedrooms:
+                region = _find_adjacent_empty_region(
+                    floorplan, random.choice(available_bedrooms).room_id, min_size=2
+                )
+            elif bedrooms:
+                region = _find_adjacent_empty_region(
+                    floorplan, random.choice(bedrooms).room_id, min_size=2
+                )
+            else:
+                region = _find_empty_region(floorplan, min_size=2, prefer_center=False)
+    else:
+        region = _find_empty_region(floorplan, min_size=2, prefer_center=False)
+
+    if region is None:
+        raise InvalidFloorplan(f"No space to place {room_type} (room_id={room.room_id})")
+
+    # Ensure all indices are Python ints (not numpy types)
+    start_r, start_c, width, height = int(region[0]), int(region[1]), int(region[2]), int(region[3])
+
+    # Calculate total grid size and number of rooms to estimate fair share
+    total_cells = floorplan.size
+    num_rooms = len(room_spec.room_type_map)
+
+    # Calculate fair share per room - divide space evenly then scale by room ratio
+    total_ratio = sum(r.ratio for r in room_spec.room_map.values()
+                      if hasattr(r, 'ratio') and r.ratio is not None)
+    if total_ratio > 0:
+        room_ratio_share = room.ratio / total_ratio
+    else:
+        room_ratio_share = 1.0 / num_rooms
+
+    # Target cells based on fair share - be conservative initially (use 50-70% of fair share)
+    # so rooms have space to be placed, then grow later
+    conservation_factor = 0.5 if num_rooms > 6 else 0.7
+    target_cells = int(total_cells * room_ratio_share * conservation_factor)
+    target_cells = min(target_cells, width * height)
+    target_cells = max(target_cells, 2)  # At least 2 cells
+
+    # Also limit by room type - some rooms should be smaller initially
+    if room_type == "Bathroom":
+        target_cells = min(target_cells, 4)  # Bathrooms are small
+    elif room_type == "Hallway":
+        target_cells = min(target_cells, 6)  # Hallways are narrow
+    elif room_type == "Kitchen":
+        target_cells = min(target_cells, 9)  # Kitchens are modest
+
+    # Calculate dimensions that fit the target - ensure all values are ints
+    if room_type == "Hallway":
+        # Hallways should be narrow
+        if width > height:
+            used_w = int(min(width, max(target_cells, 3)))
+            used_h = 1
+        else:
+            used_w = 1
+            used_h = int(min(height, max(target_cells, 3)))
+    elif room_type == "Bedroom":
+        # Bedrooms must be at least 2x2 to pass validation
+        min_dim = MIN_BEDROOM_DIMENSION_CELLS
+        used_w = int(max(min_dim, min(width, int(target_cells ** 0.5) + 1)))
+        used_h = int(max(min_dim, min(height, int(target_cells ** 0.5) + 1)))
+        while used_w * used_h < target_cells and used_w < width:
+            used_w += 1
+        while used_w * used_h < target_cells and used_h < height:
+            used_h += 1
+    else:
+        # Try to keep rooms somewhat square
+        used_w = int(min(width, int(target_cells ** 0.5) + 1))
+        used_h = int(min(height, int(target_cells ** 0.5) + 1))
+        while used_w * used_h < target_cells and used_w < width:
+            used_w += 1
+        while used_w * used_h < target_cells and used_h < height:
+            used_h += 1
+
+    # Place the room - ensure all bounds are Python ints for grow_l_shape compatibility
+    room.min_x = int(start_c)
+    room.max_x = int(start_c + used_w)
+    room.min_y = int(start_r)
+    room.max_y = int(start_r + used_h)
+
+    floorplan[int(start_r):int(start_r + used_h), int(start_c):int(start_c + used_w)] = room.room_id
+
+
+def _rooms_adjacent(room_id1: int, room_id2: int, floorplan: np.ndarray) -> bool:
+    """Check if two rooms are adjacent in the floorplan."""
+    rows, cols = floorplan.shape
+    mask1 = floorplan == room_id1
+
+    for r in range(rows):
+        for c in range(cols):
+            if mask1[r, c]:
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < rows and 0 <= nc < cols:
+                        if floorplan[nr, nc] == room_id2:
+                            return True
+    return False
+
+
+def _fill_empty_space(
+    floorplan: np.ndarray,
+    placed_rooms: list,
+    room_spec: Optional[RoomSpec] = None,
+) -> None:
+    """Fill remaining empty space by growing existing rooms.
+
+    For bedrooms and bathrooms, only grow rectangularly to maintain their
+    required rectangular shape. For other rooms, use L-shape growth.
+    """
+    # Separate rooms into rectangular-only (bedrooms/bathrooms) and L-shape allowed
+    rect_only_types = {"Bedroom", "Bathroom"}
+    rect_rooms = set()
+    lshape_rooms = set()
+
+    for room in placed_rooms:
+        if room_spec and room_spec.room_type_map.get(room.room_id) in rect_only_types:
+            rect_rooms.add(room)
+        else:
+            lshape_rooms.add(room)
+
+    # First, grow rectangular rooms (bedrooms/bathrooms) with grow_rect only
+    max_iterations = 500
+    iteration = 0
+    while rect_rooms and iteration < max_iterations:
+        iteration += 1
+        room = random.choice(list(rect_rooms))
+        can_grow = grow_rect(room, floorplan)
+        if not can_grow:
+            rect_rooms.discard(room)
+
+    # Then, grow other rooms with L-shape growth
+    iteration = 0
+    while lshape_rooms and iteration < max_iterations:
+        iteration += 1
+        room = random.choice(list(lshape_rooms))
+        can_grow = grow_l_shape(room, floorplan)
+        if not can_grow:
+            lshape_rooms.discard(room)
 
 
 def generate_floorplan(
