@@ -42,7 +42,7 @@ uv run python <script_path> [arguments]
 The primary test command for verifying the setup:
 
 ```bash
-uv run python scripts/generate_dataset.py --num-houses 100 --output dataset.json.gz --save-images --image-dir ./images/
+uv run python scripts/generate_dataset.py --num-houses 10 --output dataset.json.gz --save-images --image-dir ./images/
 ```
 
 **Arguments:**
