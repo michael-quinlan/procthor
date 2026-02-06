@@ -21,6 +21,7 @@ from .connectivity import (
     validate_strict_door_rules,
     InvalidConnectivity,
 )
+from .validation import validate_room_proportions
 from .color_objects import default_randomize_object_colors
 from .doors import default_add_doors
 from .exterior_walls import default_add_exterior_walls
@@ -208,6 +209,12 @@ class HouseGenerator:
                 house_structure=house_structure,
                 room_spec=room_spec,
             )
+
+            # Early validation: check room proportions before any Unity operations
+            passed, reason = validate_room_proportions(partial_house)
+            if not passed:
+                raise InvalidFloorplan(reason)
+
             partial_house.next_sampling_stage = next_sampling_stage
             structure_duration = time.time() - structure_start
             cumulative_time += structure_duration
