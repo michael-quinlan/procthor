@@ -365,7 +365,6 @@ def default_add_doors(
 ) -> Dict[int, List[Polygon]]:
     """Add doors to the house."""
     from procthor.constants import EMPTY_ROOM_ID
-    print("[DOORS] Starting default_add_doors", flush=True)
     assert split in {"train", "val", "test"}
 
     room_spec = partial_house.room_spec
@@ -375,26 +374,20 @@ def default_add_doors(
         k for k in boundary_groups.keys()
         if EMPTY_ROOM_ID not in k
     )
-    print(f"[DOORS] neighboring_rooms={neighboring_rooms}", flush=True)
 
     # First, get doors required by connectivity rules
-    print("[DOORS] Getting required_doors...", flush=True)
     required_doors = get_required_doors(
         neighboring_rooms=neighboring_rooms,
         room_type_map=room_spec.room_type_map,
     )
-    print(f"[DOORS] required_doors={required_doors}", flush=True)
 
     # Then, get doors from the room spec hierarchy (for connectivity within MetaRooms)
-    print("[DOORS] Getting room_spec_neighbors...", flush=True)
     room_spec_neighbors = get_room_spec_neighbors(room_spec=room_spec.spec)
-    print("[DOORS] Calling select_openings...", flush=True)
     hierarchy_openings = select_openings(
         neighboring_rooms=neighboring_rooms,
         room_spec_neighbors=room_spec_neighbors,
         room_spec=room_spec,
     )
-    print(f"[DOORS] hierarchy_openings={hierarchy_openings}", flush=True)
 
     # Filter required_doors to remove any bedroom-kitchen doors
     # (should not happen normally, but ensure constraint is enforced)
@@ -450,45 +443,19 @@ def default_add_doors(
             if room2_type == "Bathroom":
                 bathrooms_with_doors.add(opening[1])
 
-    print(f"[DOORS] all_openings={all_openings}", flush=True)
-
-    # Check if Kitchen has any doors
-    for opening in all_openings:
-        room1_type = room_spec.room_type_map.get(opening[0])
-        room2_type = room_spec.room_type_map.get(opening[1])
-        if room1_type == "Kitchen" or room2_type == "Kitchen":
-            print(f"[DOORS] Kitchen door in all_openings: {opening} ({room1_type} <-> {room2_type})", flush=True)
-
-    # Check if Kitchen has any doors in all_openings
-    kitchen_has_door = any(
-        room_spec.room_type_map.get(o[0]) == "Kitchen" or room_spec.room_type_map.get(o[1]) == "Kitchen"
-        for o in all_openings
-    )
-    if not kitchen_has_door:
-        print(f"[DOORS] WARNING: Kitchen has NO doors in all_openings!", flush=True)
-        # Check what happened to kitchen doors
-        kitchens = [rid for rid, rtype in room_spec.room_type_map.items() if rtype == "Kitchen"]
-        for kitchen_id in kitchens:
-            print(f"[DOORS]   Kitchen id: {kitchen_id}", flush=True)
-            print(f"[DOORS]   boundary_groups keys involving kitchen: {[k for k in boundary_groups.keys() if kitchen_id in k]}", flush=True)
-
-    print("[DOORS] Calling select_door_walls for openings", flush=True)
     door_walls = select_door_walls(
         openings=all_openings,
         boundary_groups=boundary_groups,
     )
 
-    print("[DOORS] Calling select_outdoor_openings", flush=True)
     outdoor_openings = select_outdoor_openings(
         boundary_groups=boundary_groups, room_type_map=room_spec.room_type_map
     )
-    print("[DOORS] Calling select_door_walls for outdoor", flush=True)
     outdoor_walls = select_door_walls(
         openings=outdoor_openings,
         boundary_groups=boundary_groups,
     )
 
-    print("[DOORS] Calling add_door_meta", flush=True)
     door_walls.update(outdoor_walls)
     polygons_to_subtract = add_door_meta(
         partial_house=partial_house,
@@ -499,7 +466,6 @@ def default_add_doors(
         boundary_groups=boundary_groups,
         pt_db=pt_db,
     )
-    print("[DOORS] add_door_meta complete", flush=True)
     return polygons_to_subtract
 
 
