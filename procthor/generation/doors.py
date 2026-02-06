@@ -662,8 +662,7 @@ def select_door_walls(openings: List[Tuple[int, int]], boundary_groups: Boundary
     chosen_openings = dict()
     for opening in openings:
         if opening not in boundary_groups:
-            print(f"[DOORS] WARNING: Opening {opening} not in boundary_groups! Skipping.", flush=True)
-            print(f"[DOORS]   Available keys: {list(boundary_groups.keys())[:20]}...", flush=True)
+            logging.warning(f"Opening {opening} not in boundary_groups, skipping")
             continue
         candidates = list(boundary_groups[opening])
         population = range(len(candidates))
