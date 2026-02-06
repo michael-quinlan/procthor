@@ -3,6 +3,7 @@ import gzip
 import json
 import logging
 import random
+import time
 from collections import Counter
 from functools import total_ordering
 from typing import Any, Dict, List, Optional, Tuple
@@ -105,26 +106,50 @@ class House:
         Returns a dictionary of warnings or errors.
         """
         warnings = {}
+        validate_start = time.time()
+
+        # Time reset()
+        reset_start = time.time()
         controller.reset(renderImage=False)
+        reset_duration = time.time() - reset_start
+        print(f"[VALIDATE] reset(): {reset_duration:.2f}s")
+
+        # Time CreateHouse
+        create_start = time.time()
         event = controller.step(
             action="CreateHouse", house=self.data, renderImage=False
         )
+        create_duration = time.time() - create_start
+        print(f"[VALIDATE] CreateHouse: {create_duration:.2f}s")
+
         if not event:
             warnings["CreateHouse"] = "Failed to create house."
             logging.warning(warnings)
             self.data["metadata"]["warnings"] = warnings
             return warnings
+
+        # Time TeleportFull
+        teleport_start = time.time()
         event = controller.step(
             action="TeleportFull",
             **self.data["metadata"]["agent"],
             renderImage=False,
         )
+        teleport_duration = time.time() - teleport_start
+        print(f"[VALIDATE] TeleportFull: {teleport_duration:.2f}s")
+
         if not event:
             warnings["TeleportFull"] = "Unable to teleport to starting position."
             logging.warning(warnings)
             self.data["metadata"]["warnings"] = warnings
             return warnings
+
+        # Time GetReachablePositions
+        grp_start = time.time()
         event = controller.step(action="GetReachablePositions", renderImage=False)
+        grp_duration = time.time() - grp_start
+        print(f"[VALIDATE] GetReachablePositions: {grp_duration:.2f}s")
+
         if not event:
             warnings["GetReachablePositions"] = "Failed to get reachable positions"
             logging.warning(warnings)
@@ -135,6 +160,7 @@ class House:
         random.shuffle(rps)
 
         # Check that every room is reachable
+        reachability_start = time.time()
         points_per_room = Counter({r: 0 for r in self.rooms})
         for p in rps:
             point = Point(p["x"], p["z"])
@@ -156,10 +182,16 @@ class House:
                 "RoomsNotNavigable"
             ] = f"Rooms {unnavigable_rooms} / {len(points_per_room)} are not navigable."
 
+        reachability_duration = time.time() - reachability_start
+        print(f"[VALIDATE] Room reachability check: {reachability_duration:.2f}s")
+
         if warnings:
             logging.warning(warnings)
 
         self.data["metadata"]["warnings"] = warnings
+
+        total_duration = time.time() - validate_start
+        print(f"[VALIDATE] Total validate(): {total_duration:.2f}s")
 
         return warnings
 
