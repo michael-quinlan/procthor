@@ -549,13 +549,11 @@ def get_hallway_connectivity_penalty(room_spec: RoomSpec, floorplan: np.ndarray)
             adjacent_ids = adjacencies.get(room_id, set())
             adjacent_types = {room_spec.room_type_map.get(adj_id) for adj_id in adjacent_ids}
 
-            # Hallway must connect to LivingRoom (preferred) or Kitchen (fallback)
+            # Hallway must connect to LivingRoom
             if "LivingRoom" in adjacent_types:
                 penalty += 2.0  # Best: connected to LivingRoom
-            elif "Kitchen" in adjacent_types:
-                penalty += 1.0  # Acceptable: connected to Kitchen (fallback)
             else:
-                penalty -= 10.0  # Heavy penalty: no public room connection
+                penalty -= 10.0  # Heavy penalty: no LivingRoom connection
 
     return penalty
 
@@ -1648,19 +1646,19 @@ def _place_room_incrementally(
 
     elif room_type == "Hallway":
         # Hallway should connect public to private areas
-        # Place adjacent to LivingRoom or Kitchen
+        # Place adjacent to LivingRoom ONLY
         # IMPORTANT: Start with a larger hallway to provide adjacency for multiple bedrooms
-        public_rooms = [r for r in placed_rooms
-                       if room_spec.room_type_map.get(r.room_id) in {"LivingRoom", "Kitchen"}]
-        if public_rooms:
+        living_rooms = [r for r in placed_rooms
+                       if room_spec.room_type_map.get(r.room_id) == "LivingRoom"]
+        if living_rooms:
             # Start with larger min_size for hallway to have room to grow as corridor
             region = _find_adjacent_empty_region(
-                floorplan, random.choice(public_rooms).room_id, min_size=4
+                floorplan, random.choice(living_rooms).room_id, min_size=4
             )
             if region is None:
                 # Fallback to smaller if can't find larger space
                 region = _find_adjacent_empty_region(
-                    floorplan, random.choice(public_rooms).room_id, min_size=2
+                    floorplan, random.choice(living_rooms).room_id, min_size=2
                 )
         else:
             region = _find_empty_region(floorplan, min_size=4, prefer_center=False)

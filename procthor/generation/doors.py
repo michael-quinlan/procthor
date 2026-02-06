@@ -230,16 +230,12 @@ def get_required_doors(
             if all_adjacent:
                 add_door(bathroom_id, random.choice(all_adjacent))
 
-    # Rule 3: Each hallway needs door to LivingRoom (preferred) or Kitchen (fallback)
+    # Rule 3: Each hallway needs door to LivingRoom
     for hallway_id in hallways:
         adjacent_living = find_adjacent_of_type(hallway_id, {"LivingRoom"})
         if adjacent_living:
             add_door(hallway_id, random.choice(adjacent_living))
-        else:
-            # Fallback to Kitchen if no LivingRoom available
-            adjacent_kitchen = find_adjacent_of_type(hallway_id, {"Kitchen"})
-            if adjacent_kitchen:
-                add_door(hallway_id, random.choice(adjacent_kitchen))
+        # If no LivingRoom adjacent, don't add door - will fail validation
 
     # Rule 4: Hallways need at least 2 doors - add more if needed
     for hallway_id in hallways:
