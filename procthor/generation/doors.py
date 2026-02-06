@@ -289,6 +289,71 @@ def get_required_doors(
             else:
                 logging.error(f"Room {room_id} ({room_type}) has no adjacent rooms - cannot add door")
 
+    # Rule 6: Kitchen must have at least one door
+    kitchens = [rid for rid, rtype in room_type_map.items() if rtype == "Kitchen"]
+    for kitchen_id in kitchens:
+        if kitchen_id not in rooms_with_doors:
+            # Find any adjacent room and add a door
+            adjacent = find_all_adjacent(kitchen_id)
+            if adjacent:
+                # Prefer LivingRoom, then Hallway, then any room
+                adj_living = [r for r in adjacent if room_type_map.get(r) == "LivingRoom"]
+                adj_hallway = [r for r in adjacent if room_type_map.get(r) == "Hallway"]
+                if adj_living:
+                    add_door(kitchen_id, random.choice(adj_living))
+                elif adj_hallway:
+                    add_door(kitchen_id, random.choice(adj_hallway))
+                else:
+                    add_door(kitchen_id, random.choice(adjacent))
+
+    # Rule 7: Kitchen must be reachable from LivingRoom
+    # Update rooms_with_doors after Rule 6 potentially added doors
+    rooms_with_doors = set()
+    for door in required_doors:
+        rooms_with_doors.add(door[0])
+        rooms_with_doors.add(door[1])
+
+    # Log Kitchen connectivity for debugging
+    for kitchen_id in kitchens:
+        kitchen_doors = [(a, b) for a, b in required_doors if kitchen_id in (a, b)]
+        logging.debug(f"[DOORS-RULE7] Kitchen {kitchen_id} has doors: {kitchen_doors}")
+        if not kitchen_doors:
+            logging.warning(f"[DOORS-RULE7] Kitchen {kitchen_id} has NO doors before Rule 7!")
+
+    for kitchen_id in kitchens:
+        # Check what Kitchen is connected to
+        kitchen_doors = [(a, b) for a, b in required_doors if kitchen_id in (a, b)]
+        kitchen_neighbors = set()
+        for a, b in kitchen_doors:
+            kitchen_neighbors.add(a if b == kitchen_id else b)
+
+        # Check if Kitchen directly connects to LivingRoom
+        if any(room_type_map.get(r) == "LivingRoom" for r in kitchen_neighbors):
+            continue  # Good - direct connection
+
+        # Check if Kitchen connects to Hallway
+        connected_hallways = [r for r in kitchen_neighbors if room_type_map.get(r) == "Hallway"]
+        if not connected_hallways:
+            # Kitchen not connected to Hallway - try to add door to LivingRoom
+            adj_living = find_adjacent_of_type(kitchen_id, {"LivingRoom"})
+            if adj_living:
+                add_door(kitchen_id, adj_living[0])
+                continue
+            # Can't connect Kitchen to LivingRoom directly - house will fail validation
+
+        # Kitchen connects to Hallway - ensure Hallway connects to LivingRoom
+        for hallway_id in connected_hallways:
+            hallway_doors = [(a, b) for a, b in required_doors if hallway_id in (a, b)]
+            hallway_neighbors = set()
+            for a, b in hallway_doors:
+                hallway_neighbors.add(a if b == hallway_id else b)
+
+            if not any(room_type_map.get(r) == "LivingRoom" for r in hallway_neighbors):
+                # Hallway not connected to LivingRoom - try to add door
+                adj_living = find_adjacent_of_type(hallway_id, {"LivingRoom"})
+                if adj_living:
+                    add_door(hallway_id, adj_living[0])
+
     return required_doors
 
 
@@ -384,6 +449,28 @@ def default_add_doors(
                 bathrooms_with_doors.add(opening[0])
             if room2_type == "Bathroom":
                 bathrooms_with_doors.add(opening[1])
+
+    print(f"[DOORS] all_openings={all_openings}", flush=True)
+
+    # Check if Kitchen has any doors
+    for opening in all_openings:
+        room1_type = room_spec.room_type_map.get(opening[0])
+        room2_type = room_spec.room_type_map.get(opening[1])
+        if room1_type == "Kitchen" or room2_type == "Kitchen":
+            print(f"[DOORS] Kitchen door in all_openings: {opening} ({room1_type} <-> {room2_type})", flush=True)
+
+    # Check if Kitchen has any doors in all_openings
+    kitchen_has_door = any(
+        room_spec.room_type_map.get(o[0]) == "Kitchen" or room_spec.room_type_map.get(o[1]) == "Kitchen"
+        for o in all_openings
+    )
+    if not kitchen_has_door:
+        print(f"[DOORS] WARNING: Kitchen has NO doors in all_openings!", flush=True)
+        # Check what happened to kitchen doors
+        kitchens = [rid for rid, rtype in room_spec.room_type_map.items() if rtype == "Kitchen"]
+        for kitchen_id in kitchens:
+            print(f"[DOORS]   Kitchen id: {kitchen_id}", flush=True)
+            print(f"[DOORS]   boundary_groups keys involving kitchen: {[k for k in boundary_groups.keys() if kitchen_id in k]}", flush=True)
 
     print("[DOORS] Calling select_door_walls for openings", flush=True)
     door_walls = select_door_walls(
@@ -608,6 +695,10 @@ def select_openings(
 def select_door_walls(openings: List[Tuple[int, int]], boundary_groups: BoundaryGroups):
     chosen_openings = dict()
     for opening in openings:
+        if opening not in boundary_groups:
+            print(f"[DOORS] WARNING: Opening {opening} not in boundary_groups! Skipping.", flush=True)
+            print(f"[DOORS]   Available keys: {list(boundary_groups.keys())[:20]}...", flush=True)
+            continue
         candidates = list(boundary_groups[opening])
         population = range(len(candidates))
         weights = [abs(c[1][0] - c[0][0]) + abs(c[1][1] - c[0][1]) for c in candidates]

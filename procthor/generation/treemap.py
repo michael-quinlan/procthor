@@ -1378,6 +1378,7 @@ def place_room_in_region(
     region: RoomRegion,
     floorplan: np.ndarray,
     min_dimension: int = 2,
+    interior_boundary_scale: float = 1.9,
 ) -> bool:
     """Place a room within its allocated region.
 
@@ -1389,13 +1390,26 @@ def place_room_in_region(
         region: The allocated region for this room
         floorplan: The floorplan grid
         min_dimension: Minimum dimension for the room
+        interior_boundary_scale: Scale factor (meters per grid cell) for size constraints
 
     Returns:
         True if placement succeeded, False otherwise
     """
     # Try different sizes, starting from larger to smaller
-    max_width = min(3, region.width)
-    max_height = min(3, region.height)
+    # Hallway should span its full region to maintain adjacencies with LivingRoom
+    if region.room_type == "Hallway":
+        max_width = region.width
+        max_height = region.height
+    elif region.room_type == "Bathroom":
+        # Calculate max cells based on scale to respect 8 sqm limit
+        cell_area = interior_boundary_scale ** 2
+        max_cells = max(1, int(8.0 / cell_area))  # At least 1 cell
+        max_dim = max(1, int(max_cells ** 0.5))   # Square root for max dimension
+        max_width = min(max_dim, region.width)
+        max_height = min(max_dim, region.height)
+    else:
+        max_width = min(3, region.width)
+        max_height = min(3, region.height)
 
     # Generate size candidates: try larger first, then smaller
     sizes = []

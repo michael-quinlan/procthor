@@ -345,7 +345,10 @@ def grow_l_shape(room, floorplan):
 
 
 def expand_rooms(
-    rooms: Sequence[Union[LeafRoom, MetaRoom]], floorplan: np.ndarray
+    rooms: Sequence[Union[LeafRoom, MetaRoom]],
+    floorplan: np.ndarray,
+    room_spec: Optional[RoomSpec] = None,
+    interior_boundary_scale: float = 1.9,
 ) -> None:
     """Assign rooms from a given hierarchy to the floorplan.
 
@@ -368,6 +371,12 @@ def expand_rooms(
     rooms_to_grow = set(rooms)
     while rooms_to_grow:
         room = select_room(rooms_to_grow)
+        # Check bathroom size limit before growing
+        if room_spec:
+            room_type = room_spec.room_type_map.get(room.room_id)
+            if room_type == "Bathroom" and not _bathroom_can_grow(room, floorplan, interior_boundary_scale):
+                rooms_to_grow.remove(room)
+                continue
         can_grow = grow_rect(room, floorplan)
         if not can_grow:
             rooms_to_grow.remove(room)
@@ -376,6 +385,12 @@ def expand_rooms(
     rooms_to_grow = set(rooms)
     while rooms_to_grow:
         room = select_room(rooms_to_grow)
+        # Check bathroom size limit before growing
+        if room_spec:
+            room_type = room_spec.room_type_map.get(room.room_id)
+            if room_type == "Bathroom" and not _bathroom_can_grow(room, floorplan, interior_boundary_scale):
+                rooms_to_grow.remove(room)
+                continue
         can_grow = grow_l_shape(room, floorplan)
         if not can_grow:
             rooms_to_grow.remove(room)
@@ -792,6 +807,35 @@ def score_floorplan(
     return score
 
 
+def check_room_proportions(
+    room_spec: RoomSpec,
+    floorplan: np.ndarray,
+    cell_size_sqm: float = 3.6,
+) -> tuple:
+    """Check room proportion rules.
+
+    Returns:
+        (is_valid, error_message) tuple. If valid, error_message is None.
+    """
+    # Rule: No bathroom should be larger than the living room
+    living_room_area = None
+    for room_id, room_type in room_spec.room_type_map.items():
+        if room_type == "LivingRoom":
+            _, _, area = get_room_dimensions(room_id, floorplan)
+            living_room_area = area * cell_size_sqm
+            break
+
+    if living_room_area is not None:
+        for room_id, room_type in room_spec.room_type_map.items():
+            if room_type == "Bathroom":
+                _, _, area = get_room_dimensions(room_id, floorplan)
+                bathroom_area = area * cell_size_sqm
+                if bathroom_area > living_room_area:
+                    return False, f"Bathroom ({bathroom_area:.1f}m²) > LivingRoom ({living_room_area:.1f}m²)"
+
+    return True, None
+
+
 def validate_strict_rules(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
     """Check if floorplan passes all strict layout rules.
 
@@ -838,6 +882,17 @@ def validate_strict_rules(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
             if min(width, height) < MIN_BEDROOM_DIMENSION_CELLS:
                 return False
 
+    # Rule: Kitchen must be adjacent to LivingRoom
+    # This ensures Kitchen is reachable from the main living area
+    kitchens = [rid for rid, rtype in room_spec.room_type_map.items() if rtype == "Kitchen"]
+    living_rooms = [rid for rid, rtype in room_spec.room_type_map.items() if rtype == "LivingRoom"]
+    for kitchen_id in kitchens:
+        adjacent_ids = adjacencies.get(kitchen_id, set())
+        adjacent_types = {room_spec.room_type_map.get(adj_id) for adj_id in adjacent_ids}
+        if "LivingRoom" not in adjacent_types:
+            logging.warning(f"Kitchen {kitchen_id} not adjacent to any LivingRoom")
+            return False
+
     # Rule: At least one bathroom must be accessible from a public area
     # (not only through bedrooms) - ensures a "guest bathroom" exists
     bathrooms = sorted([rid for rid, rtype in room_spec.room_type_map.items() if rtype == "Bathroom"])
@@ -863,14 +918,22 @@ def validate_strict_rules(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
             if "Bedroom" not in adjacent_types:
                 return False
 
+    # Rule: Check room proportions (e.g., bathroom cannot exceed living room)
+    proportions_valid, _ = check_room_proportions(room_spec, floorplan)
+    if not proportions_valid:
+        return False
+
     return True
 
 
 def recursively_expand_rooms(
-    rooms: Sequence[Union[LeafRoom, MetaRoom]], floorplan: np.ndarray
+    rooms: Sequence[Union[LeafRoom, MetaRoom]],
+    floorplan: np.ndarray,
+    room_spec: Optional[RoomSpec] = None,
+    interior_boundary_scale: float = 1.9,
 ) -> None:
     """Assign rooms to the floorplan and expand it if it is a MetaRoom."""
-    expand_rooms(rooms, floorplan)
+    expand_rooms(rooms, floorplan, room_spec=room_spec, interior_boundary_scale=interior_boundary_scale)
     for room in rooms:
         if isinstance(room, MetaRoom):
             floorplan_mask = floorplan == room.room_id
@@ -878,6 +941,8 @@ def recursively_expand_rooms(
             recursively_expand_rooms(
                 room.children,
                 floorplan[room.min_y : room.max_y, room.min_x : room.max_x],
+                room_spec=room_spec,
+                interior_boundary_scale=interior_boundary_scale,
             )
 
 
@@ -999,6 +1064,47 @@ def _hallway_can_grow(
     MAX_HALLWAY_SQM = 9.0
 
     return hallway_area_sqm < MAX_HALLWAY_SQM
+
+
+def _bathroom_can_grow(
+    bathroom,
+    floorplan: np.ndarray,
+    interior_boundary_scale: float = 1.9
+) -> bool:
+    """Check if bathroom can grow without exceeding size limits.
+
+    The max bathroom size from ROOM_SIZE_TARGETS_SQM is 8.0 sqm.
+    This prevents bathrooms from growing excessively large.
+
+    Note: Growth operations (grow_rect, grow_room_in_region) add a full row/column
+    at a time. Growing adds max(width, height) cells in the worst case (e.g., a 1x3
+    bathroom growing down adds 3 cells). We use this worst-case estimate.
+    """
+    if bathroom is None:
+        return False
+
+    # Count actual cells in the bathroom (handles L-shaped rooms correctly)
+    bathroom_cells = np.sum(floorplan == bathroom.room_id)
+
+    # Convert to square meters
+    cell_area_sqm = interior_boundary_scale ** 2  # ~3.61 to ~4.84 sqm per cell
+    bathroom_area_sqm = bathroom_cells * cell_area_sqm
+
+    # Max bathroom size from ROOM_SIZE_TARGETS_SQM
+    MAX_BATHROOM_SQM = 8.0
+
+    # Already at or over limit - stop
+    if bathroom_area_sqm >= MAX_BATHROOM_SQM:
+        return False
+
+    # Growth adds a full row or column. Use the LARGER dimension as worst-case
+    # estimate of cells added (e.g., 1x3 bathroom growing down adds 3 cells).
+    current_width = bathroom.max_x - bathroom.min_x
+    current_height = bathroom.max_y - bathroom.min_y
+    max_grow = max(current_width, current_height) if current_width > 0 and current_height > 0 else 1
+    area_after_growth = (bathroom_cells + max_grow) * cell_area_sqm
+
+    return area_after_growth <= MAX_BATHROOM_SQM
 
 
 def _ensure_enough_edge_space(
@@ -1247,7 +1353,7 @@ def incremental_generate_floorplan(
 
         print(f"[INC] All rooms placed, filling empty space", flush=True)
         # Fill remaining empty space - use rectangular growth for bedrooms/bathrooms
-        _fill_empty_space(floorplan, placed_rooms, room_spec=room_spec)
+        _fill_empty_space(floorplan, placed_rooms, room_spec=room_spec, interior_boundary_scale=interior_boundary_scale)
 
         print(f"[INC] Validating strict rules", flush=True)
         # Check strict rules
@@ -1388,7 +1494,7 @@ def treemap_generate_floorplan(
             min_dim = MIN_BEDROOM_DIMENSION_CELLS if room_type == "Bedroom" else 1
 
             # Place room in region
-            if place_room_in_region(room, region, floorplan, min_dimension=min_dim):
+            if place_room_in_region(room, region, floorplan, min_dimension=min_dim, interior_boundary_scale=interior_boundary_scale):
                 placed_rooms.append(room)
                 if debug:
                     print(f"[TREEMAP]   Placed room {room_id} ({room_type}) at ({room.min_y},{room.min_x})-({room.max_y},{room.max_x})")
@@ -1420,11 +1526,14 @@ def treemap_generate_floorplan(
             room_type = room_spec.room_type_map.get(room_id, "")
 
             # Grow until we fill the region or can't grow anymore
-            # But limit hallway size to prevent proportion check failures
+            # But limit hallway and bathroom size to prevent proportion check failures
             max_grow = 50
             for _ in range(max_grow):
                 # Check hallway size limit before growing
-                if room_type == "Hallway" and not _hallway_can_grow(room, floorplan):
+                if room_type == "Hallway" and not _hallway_can_grow(room, floorplan, interior_boundary_scale):
+                    break
+                # Check bathroom size limit before growing
+                if room_type == "Bathroom" and not _bathroom_can_grow(room, floorplan, interior_boundary_scale):
                     break
                 if not grow_room_in_region(room, region, floorplan):
                     break
@@ -1433,7 +1542,7 @@ def treemap_generate_floorplan(
         if debug:
             print(f"[TREEMAP]   Filling remaining empty space")
 
-        _fill_empty_space(floorplan, placed_rooms, room_spec=room_spec)
+        _fill_empty_space(floorplan, placed_rooms, room_spec=room_spec, interior_boundary_scale=interior_boundary_scale)
 
         # Validate
         if debug:
@@ -1916,6 +2025,7 @@ def _fill_empty_space(
     floorplan: np.ndarray,
     placed_rooms: list,
     room_spec: Optional[RoomSpec] = None,
+    interior_boundary_scale: float = 1.9,
 ) -> None:
     """Fill remaining empty space by growing existing rooms.
 
@@ -1956,6 +2066,13 @@ def _fill_empty_space(
         if iteration % 100 == 0:
             _debug_print(f"_fill_empty_space: rect iteration {iteration}")
         room = random.choice(list(rect_rooms))
+
+        # Check if this is a bathroom and enforce size limit
+        room_type = room_spec.room_type_map.get(room.room_id) if room_spec else None
+        if room_type == "Bathroom" and not _bathroom_can_grow(room, floorplan, interior_boundary_scale):
+            rect_rooms.discard(room)
+            continue
+
         can_grow = grow_rect(room, floorplan)
         if not can_grow:
             rect_rooms.discard(room)
@@ -1973,7 +2090,12 @@ def _fill_empty_space(
 
         # Check if this is a hallway and enforce size limit
         room_type = room_spec.room_type_map.get(room.room_id) if room_spec else None
-        if room_type == "Hallway" and not _hallway_can_grow(room, floorplan):
+        if room_type == "Hallway" and not _hallway_can_grow(room, floorplan, interior_boundary_scale):
+            lshape_rooms.discard(room)
+            continue
+
+        # Check if this is a bathroom and enforce size limit
+        if room_type == "Bathroom" and not _bathroom_can_grow(room, floorplan, interior_boundary_scale):
             lshape_rooms.discard(room)
             continue
 
@@ -2013,7 +2135,12 @@ def generate_floorplan(
     for _ in range(candidate_generations):
         floorplan = interior_boundary.copy()
         try:
-            recursively_expand_rooms(rooms=room_spec.spec, floorplan=floorplan)
+            recursively_expand_rooms(
+                rooms=room_spec.spec,
+                floorplan=floorplan,
+                room_spec=room_spec,
+                interior_boundary_scale=interior_boundary_scale,
+            )
         except InvalidFloorplan:
             continue
 
