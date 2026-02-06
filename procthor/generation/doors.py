@@ -230,16 +230,12 @@ def get_required_doors(
             if all_adjacent:
                 add_door(bathroom_id, random.choice(all_adjacent))
 
-    # Rule 3: Each hallway needs door to LivingRoom (preferred) or Kitchen (fallback)
+    # Rule 3: Each hallway needs door to LivingRoom
     for hallway_id in hallways:
         adjacent_living = find_adjacent_of_type(hallway_id, {"LivingRoom"})
         if adjacent_living:
             add_door(hallway_id, random.choice(adjacent_living))
-        else:
-            # Fallback to Kitchen if no LivingRoom available
-            adjacent_kitchen = find_adjacent_of_type(hallway_id, {"Kitchen"})
-            if adjacent_kitchen:
-                add_door(hallway_id, random.choice(adjacent_kitchen))
+        # If no LivingRoom adjacent, don't add door - will fail validation
 
     # Rule 4: Hallways need at least 2 doors - add more if needed
     for hallway_id in hallways:
@@ -293,6 +289,71 @@ def get_required_doors(
             else:
                 logging.error(f"Room {room_id} ({room_type}) has no adjacent rooms - cannot add door")
 
+    # Rule 6: Kitchen must have at least one door
+    kitchens = [rid for rid, rtype in room_type_map.items() if rtype == "Kitchen"]
+    for kitchen_id in kitchens:
+        if kitchen_id not in rooms_with_doors:
+            # Find any adjacent room and add a door
+            adjacent = find_all_adjacent(kitchen_id)
+            if adjacent:
+                # Prefer LivingRoom, then Hallway, then any room
+                adj_living = [r for r in adjacent if room_type_map.get(r) == "LivingRoom"]
+                adj_hallway = [r for r in adjacent if room_type_map.get(r) == "Hallway"]
+                if adj_living:
+                    add_door(kitchen_id, random.choice(adj_living))
+                elif adj_hallway:
+                    add_door(kitchen_id, random.choice(adj_hallway))
+                else:
+                    add_door(kitchen_id, random.choice(adjacent))
+
+    # Rule 7: Kitchen must be reachable from LivingRoom
+    # Update rooms_with_doors after Rule 6 potentially added doors
+    rooms_with_doors = set()
+    for door in required_doors:
+        rooms_with_doors.add(door[0])
+        rooms_with_doors.add(door[1])
+
+    # Log Kitchen connectivity for debugging
+    for kitchen_id in kitchens:
+        kitchen_doors = [(a, b) for a, b in required_doors if kitchen_id in (a, b)]
+        logging.debug(f"[DOORS-RULE7] Kitchen {kitchen_id} has doors: {kitchen_doors}")
+        if not kitchen_doors:
+            logging.warning(f"[DOORS-RULE7] Kitchen {kitchen_id} has NO doors before Rule 7!")
+
+    for kitchen_id in kitchens:
+        # Check what Kitchen is connected to
+        kitchen_doors = [(a, b) for a, b in required_doors if kitchen_id in (a, b)]
+        kitchen_neighbors = set()
+        for a, b in kitchen_doors:
+            kitchen_neighbors.add(a if b == kitchen_id else b)
+
+        # Check if Kitchen directly connects to LivingRoom
+        if any(room_type_map.get(r) == "LivingRoom" for r in kitchen_neighbors):
+            continue  # Good - direct connection
+
+        # Check if Kitchen connects to Hallway
+        connected_hallways = [r for r in kitchen_neighbors if room_type_map.get(r) == "Hallway"]
+        if not connected_hallways:
+            # Kitchen not connected to Hallway - try to add door to LivingRoom
+            adj_living = find_adjacent_of_type(kitchen_id, {"LivingRoom"})
+            if adj_living:
+                add_door(kitchen_id, adj_living[0])
+                continue
+            # Can't connect Kitchen to LivingRoom directly - house will fail validation
+
+        # Kitchen connects to Hallway - ensure Hallway connects to LivingRoom
+        for hallway_id in connected_hallways:
+            hallway_doors = [(a, b) for a, b in required_doors if hallway_id in (a, b)]
+            hallway_neighbors = set()
+            for a, b in hallway_doors:
+                hallway_neighbors.add(a if b == hallway_id else b)
+
+            if not any(room_type_map.get(r) == "LivingRoom" for r in hallway_neighbors):
+                # Hallway not connected to LivingRoom - try to add door
+                adj_living = find_adjacent_of_type(hallway_id, {"LivingRoom"})
+                if adj_living:
+                    add_door(hallway_id, adj_living[0])
+
     return required_doors
 
 
@@ -303,11 +364,16 @@ def default_add_doors(
     split: Split,
 ) -> Dict[int, List[Polygon]]:
     """Add doors to the house."""
+    from procthor.constants import EMPTY_ROOM_ID
     assert split in {"train", "val", "test"}
 
     room_spec = partial_house.room_spec
     boundary_groups = partial_house.house_structure.boundary_groups
-    neighboring_rooms = set(boundary_groups.keys())
+    # Filter out boundary groups that contain EMPTY_ROOM_ID (0) - these are unfilled cells, not real rooms
+    neighboring_rooms = set(
+        k for k in boundary_groups.keys()
+        if EMPTY_ROOM_ID not in k
+    )
 
     # First, get doors required by connectivity rules
     required_doors = get_required_doors(
@@ -407,8 +473,11 @@ def select_outdoor_openings(
     boundary_groups: BoundaryGroups, room_type_map: Dict[int, str]
 ) -> List[Tuple[int, int]]:
     """Select which rooms have doors to the outside."""
+    from procthor.constants import EMPTY_ROOM_ID
+    # Filter out boundary groups that contain EMPTY_ROOM_ID (0) - these are unfilled cells, not real rooms
     outdoor_candidates = [
-        group for group in boundary_groups if OUTDOOR_ROOM_ID in group
+        group for group in boundary_groups
+        if OUTDOOR_ROOM_ID in group and EMPTY_ROOM_ID not in group
     ]
     random.shuffle(outdoor_candidates)
 
@@ -547,11 +616,15 @@ def select_openings(
 
         # NOTE: indexes that still need connecting rooms
         need_connections_between = list(range(len(group_neighbors)))
-        while need_connections_between:
+        max_iterations = len(need_connections_between) * 100  # Safety limit
+        iteration = 0
+        while need_connections_between and iteration < max_iterations:
+            iteration += 1
             next_room_i = random.choice(need_connections_between)
             other_room_is = [i for i in range(len(group_neighbors)) if i != next_room_i]
             random.shuffle(other_room_is)
             n1_subgroup = group_neighbors[next_room_i]
+            found_connection = False
             for other_room_i in other_room_is:
                 n2_subgroup = group_neighbors[other_room_i]
                 combos = [
@@ -569,7 +642,18 @@ def select_openings(
                             need_connections_between.remove(next_room_i)
                         if other_room_i in need_connections_between:
                             need_connections_between.remove(other_room_i)
+                        found_connection = True
                         break
+                if found_connection:
+                    break
+
+            # If we couldn't find any connection for this room, remove it to avoid infinite loop
+            if not found_connection and next_room_i in need_connections_between:
+                logging.warning(f"Could not find connection for room group {next_room_i}, skipping")
+                need_connections_between.remove(next_room_i)
+
+        if iteration >= max_iterations:
+            logging.warning(f"select_openings exceeded max iterations, returning partial result")
 
     return selected_doors
 
@@ -577,6 +661,9 @@ def select_openings(
 def select_door_walls(openings: List[Tuple[int, int]], boundary_groups: BoundaryGroups):
     chosen_openings = dict()
     for opening in openings:
+        if opening not in boundary_groups:
+            logging.warning(f"Opening {opening} not in boundary_groups, skipping")
+            continue
         candidates = list(boundary_groups[opening])
         population = range(len(candidates))
         weights = [abs(c[1][0] - c[0][0]) + abs(c[1][1] - c[0][1]) for c in candidates]
@@ -1128,7 +1215,28 @@ def add_door_meta(
 
         wall_map = {wall["id"]: wall for wall in partial_house.walls}
 
-        wall_0 = next(w for w in partial_house.walls if w["id"] == wall_0_id)
+        # Find wall_0 - try exact match first, then fuzzy match on coordinates
+        wall_0 = next((w for w in partial_house.walls if w["id"] == wall_0_id), None)
+        if wall_0 is None:
+            # Try fuzzy match - wall coordinates may differ slightly due to float precision
+            for w in partial_house.walls:
+                if w["id"].startswith(f"wall|{boundary[0]}|"):
+                    # Check if coordinates are close enough
+                    w_parts = w["id"].split("|")
+                    if len(w_parts) >= 6:
+                        try:
+                            w_min_x, w_min_z = float(w_parts[2]), float(w_parts[3])
+                            w_max_x, w_max_z = float(w_parts[4]), float(w_parts[5])
+                            if (abs(w_min_x - min_x_wall) < 0.1 and abs(w_min_z - min_z_wall) < 0.1 and
+                                abs(w_max_x - max_x_wall) < 0.1 and abs(w_max_z - max_z_wall) < 0.1):
+                                wall_0 = w
+                                break
+                        except (ValueError, IndexError):
+                            continue
+
+        if wall_0 is None:
+            raise KeyError(wall_0_id)
+
         wall_1 = next((w for w in partial_house.walls if w["id"] == wall_1_id), None)
 
         # NOTE: a hole appears in the wall if openXSize is used from the Unity side.

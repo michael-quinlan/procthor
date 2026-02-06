@@ -246,10 +246,10 @@ def validate_hallway_connections(
             adjacent_ids = adjacency.get(room_id, set())
             adjacent_types = {room_type_map.get(aid) for aid in adjacent_ids}
 
-            # Hallway must have door to LivingRoom or Kitchen
-            if not adjacent_types.intersection({"LivingRoom", "Kitchen"}):
+            # Hallway must have door to LivingRoom
+            if not adjacent_types.intersection({"LivingRoom"}):
                 errors.append(
-                    f"Hallway (room {room_id}) has no door to LivingRoom or Kitchen"
+                    f"Hallway (room {room_id}) has no door to LivingRoom"
                 )
 
             # Hallway must connect at least 2 rooms via doors

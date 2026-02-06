@@ -133,18 +133,28 @@ class HouseGenerator:
         next_sampling_stage: Optional[NextSamplingStage] = NextSamplingStage.STRUCTURE,
     ) -> Tuple[House, Dict[NextSamplingStage, PartialHouse]]:
         """Sample a house specification compatible with AI2-THOR."""
+        import sys
+        print("[SAMPLE] Entering sample() method", file=sys.stderr, flush=True)
         if self.controller is None:
+            print("[SAMPLE] Creating controller...", file=sys.stderr, flush=True)
             # NOTE: assumes images are never used by this Controller.
             self.controller = Controller(quality="Low", **PROCTHOR_INITIALIZATION)
+            print("[SAMPLE] Controller created", file=sys.stderr, flush=True)
             if self.seed is not None:
+                print("[SAMPLE] Setting seed...", file=sys.stderr, flush=True)
                 self.controller.step(
                     action="SetRandomSeed", seed=self.seed, renderImage=False
                 )
+                print("[SAMPLE] Seed set", file=sys.stderr, flush=True)
+        else:
+            print("[SAMPLE] Controller already exists", file=sys.stderr, flush=True)
 
+        print("[SAMPLE] Getting sampling_vars...", file=sys.stderr, flush=True)
         sampling_stage_to_ph = {}
         sampling_vars = (
             SamplingVars.sample() if sampling_vars is None else sampling_vars
         )
+        print("[SAMPLE] Got sampling_vars", file=sys.stderr, flush=True)
 
         gfs = self.generation_functions
         if partial_house is None:
@@ -160,8 +170,11 @@ class HouseGenerator:
                 interior_boundary = None
 
             # NOTE: sample house structure via rejection sampling.
+            import sys
+            print("[SAMPLE] About to sample house structure", file=sys.stderr, flush=True)
             room_ids = set(room_spec.room_type_map.keys())
-            for _ in range(10):
+            for attempt in range(10):
+                print(f"[SAMPLE] House structure attempt {attempt+1}/10", flush=True)
                 try:
                     house_structure = gfs.sample_house_structure(
                         interior_boundary=interior_boundary,
@@ -203,8 +216,10 @@ class HouseGenerator:
                     ] = copy.deepcopy(partial_house)
 
         # NOTE: DOORS
+        print("[SAMPLE] Starting DOORS stage", flush=True)
         if partial_house.next_sampling_stage <= NextSamplingStage.DOORS:
             with advance_and_record_partial(partial_house):
+                print("[SAMPLE] Calling add_doors...", flush=True)
                 door_polygons = gfs.add_doors(
                     partial_house=partial_house,
                     controller=self.controller,
@@ -253,12 +268,16 @@ class HouseGenerator:
                         + "\n".join(access_errors)
                     )
 
+        print("[SAMPLE] Starting floor_polygons", flush=True)
         floor_polygons = get_floor_polygons(
             xz_poly_map=partial_house.house_structure.xz_poly_map
         )
+        print("[SAMPLE] floor_polygons done", flush=True)
 
+        print("[SAMPLE] Starting LIGHTS stage", flush=True)
         if partial_house.next_sampling_stage <= NextSamplingStage.LIGHTS:
             with advance_and_record_partial(partial_house):
+                print("[SAMPLE] Calling add_lights...", flush=True)
                 gfs.add_lights(
                     partial_house=partial_house,
                     controller=self.controller,
@@ -268,6 +287,7 @@ class HouseGenerator:
                     ceiling_height=partial_house.house_structure.ceiling_height,
                 )
 
+        print("[SAMPLE] Starting SKYBOX stage", flush=True)
         if partial_house.next_sampling_stage <= NextSamplingStage.SKYBOX:
             with advance_and_record_partial(partial_house):
                 gfs.add_skybox(
@@ -278,6 +298,7 @@ class HouseGenerator:
                 )
 
         # NOTE: added after `randomize_wall_and_floor_materials` on purpose
+        print("[SAMPLE] Starting EXTERIOR_WALLS stage", flush=True)
         if partial_house.next_sampling_stage <= NextSamplingStage.EXTERIOR_WALLS:
             with advance_and_record_partial(partial_house):
                 gfs.add_exterior_walls(
@@ -288,6 +309,7 @@ class HouseGenerator:
                     boundary_groups=partial_house.house_structure.boundary_groups,
                 )
 
+        print("[SAMPLE] Starting ROOMS stage", flush=True)
         if partial_house.next_sampling_stage <= NextSamplingStage.ROOMS:
             with advance_and_record_partial(partial_house):
                 gfs.add_rooms(

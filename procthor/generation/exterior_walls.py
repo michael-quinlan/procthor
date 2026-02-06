@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 
 from ai2thor.controller import Controller
 
-from procthor.constants import OUTDOOR_ROOM_ID
+from procthor.constants import EMPTY_ROOM_ID, OUTDOOR_ROOM_ID
 from procthor.utils.types import BoundaryGroups, Split, Wall
 
 from ..databases import ProcTHORDatabase
@@ -24,8 +24,10 @@ def default_add_exterior_walls(
     Walls are one sided. So, adding exterior walls makes sure that when one looks
     from the window to another room, there is actually a wall there.
     """
+    # Filter out boundary groups that contain EMPTY_ROOM_ID (0) - these are unfilled cells, not real rooms
     outdoor_boundary_groups = {
-        bg: walls for bg, walls in boundary_groups.items() if OUTDOOR_ROOM_ID in bg
+        bg: walls for bg, walls in boundary_groups.items()
+        if OUTDOOR_ROOM_ID in bg and EMPTY_ROOM_ID not in bg
     }
 
     # NOTE: Intentionally not using solid colors as they're often too bright.
