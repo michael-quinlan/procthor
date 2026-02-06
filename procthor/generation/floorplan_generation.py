@@ -1202,30 +1202,26 @@ def incremental_generate_floorplan(
     """
     print(f"[INC] Starting incremental_generate_floorplan (candidate_generations={candidate_generations})", flush=True)
 
-    # Count bedrooms - treemap is designed for 3+ BR houses
+    # Count bedrooms for logging
     num_bedrooms = sum(1 for rt in room_spec.room_type_map.values() if rt == "Bedroom")
-    has_hallway = "Hallway" in room_spec.room_type_map.values()
 
-    # Try treemap approach first for 3+ BR houses with hallway
+    # Always use treemap approach for all house specs
     # Use more attempts for larger houses
-    if num_bedrooms >= 3 and has_hallway:
-        treemap_attempts = max(5, candidate_generations * 2)  # At least 5 attempts for treemap
-        print(f"[INC] Large house ({num_bedrooms}BR) - trying treemap with {treemap_attempts} attempts", flush=True)
-        try:
-            result = treemap_generate_floorplan(
-                room_spec=room_spec,
-                interior_boundary=interior_boundary,
-                candidate_generations=treemap_attempts,
-                interior_boundary_scale=interior_boundary_scale,
-                debug=True,  # Always debug treemap for now
-            )
-            print(f"[INC] Treemap approach succeeded!", flush=True)
-            return result
-        except InvalidFloorplan as e:
-            print(f"[INC] Treemap approach failed: {e}", flush=True)
-            print(f"[INC] Falling back to original incremental approach", flush=True)
-    else:
-        print(f"[INC] Small house ({num_bedrooms}BR) - skipping treemap", flush=True)
+    treemap_attempts = max(5, candidate_generations * 2)  # At least 5 attempts for treemap
+    print(f"[INC] Using treemap for all specs ({num_bedrooms}BR) with {treemap_attempts} attempts", flush=True)
+    try:
+        result = treemap_generate_floorplan(
+            room_spec=room_spec,
+            interior_boundary=interior_boundary,
+            candidate_generations=treemap_attempts,
+            interior_boundary_scale=interior_boundary_scale,
+            debug=True,  # Always debug treemap for now
+        )
+        print(f"[INC] Treemap approach succeeded!", flush=True)
+        return result
+    except InvalidFloorplan as e:
+        print(f"[INC] Treemap approach failed: {e}", flush=True)
+        print(f"[INC] Falling back to original incremental approach", flush=True)
 
     # Original incremental approach as fallback
     cell_size_sqm = interior_boundary_scale ** 2
