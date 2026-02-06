@@ -168,6 +168,8 @@ def generate_houses(
     max_retries: int = 3,
     save_images: bool = False,
     image_dir: str = "./images/",
+    bedrooms: Optional[int] = None,
+    bathrooms: Optional[int] = None,
 ) -> List[Dict]:
     """Generate a list of house data dictionaries.
 
@@ -178,14 +180,48 @@ def generate_houses(
         max_retries: Maximum retries per house on failure.
         save_images: If True, save a PNG floorplan for each house.
         image_dir: Directory to save images (if save_images is True).
+        bedrooms: If set, only generate houses with exactly this many bedrooms.
+        bathrooms: If set, only generate houses with exactly this many bathrooms.
 
     Returns:
         List of house data dictionaries.
     """
+    # Create a filtered sampler if bedroom/bathroom constraints are set
+    if bedrooms is not None or bathrooms is not None:
+        from procthor.generation.room_specs import RoomSpecSampler
+        from procthor.generation.hallway_room_specs import (
+            HALLWAY_HOUSE_2BR_1BA, HALLWAY_HOUSE_3BR_2BA, HALLWAY_HOUSE_4BR_2BA,
+            NO_HALLWAY_1BR_1BA, NO_HALLWAY_2BR_1BA,
+        )
+        # Map bedrooms to specific room specs (bathrooms optional)
+        spec_map_by_bedrooms = {
+            1: [(1, 1, NO_HALLWAY_1BR_1BA)],
+            2: [(2, 1, HALLWAY_HOUSE_2BR_1BA), (2, 1, NO_HALLWAY_2BR_1BA)],
+            3: [(3, 2, HALLWAY_HOUSE_3BR_2BA)],
+            4: [(4, 2, HALLWAY_HOUSE_4BR_2BA)],
+        }
+
+        # Find matching specs
+        matching_specs = []
+        if bedrooms in spec_map_by_bedrooms:
+            for br, ba, spec in spec_map_by_bedrooms[bedrooms]:
+                if bathrooms is None or ba == bathrooms:
+                    matching_specs.append(spec)
+
+        if matching_specs:
+            room_spec_sampler = RoomSpecSampler(matching_specs)
+            ba_str = f"{bathrooms}BA" if bathrooms else "any BA"
+            logger.info(f"Using {bedrooms}BR/{ba_str} specs ({len(matching_specs)} options)")
+        else:
+            logger.warning(f"No specific spec for {bedrooms}BR/{bathrooms}BA, using ALL_ROOM_SPEC_SAMPLER")
+            room_spec_sampler = ALL_ROOM_SPEC_SAMPLER
+    else:
+        room_spec_sampler = ALL_ROOM_SPEC_SAMPLER
+
     house_generator = HouseGenerator(
         split=split,
         seed=seed,
-        room_spec_sampler=ALL_ROOM_SPEC_SAMPLER,
+        room_spec_sampler=room_spec_sampler,
     )
 
     # Create image directory if needed
@@ -201,7 +237,7 @@ def generate_houses(
             # Sample spec ONCE per house slot to avoid bias toward smaller houses
             # (larger houses fail more often, and without this fix each retry
             # would sample a new spec, biasing toward specs that succeed quickly)
-            target_spec = ALL_ROOM_SPEC_SAMPLER.sample()
+            target_spec = room_spec_sampler.sample()
             house_generator.room_spec = target_spec
 
             retries = 0
@@ -209,16 +245,28 @@ def generate_houses(
                 try:
                     # Reset partial_house before each attempt to ensure fresh generation
                     house_generator.partial_house = None
+                    print(f"DEBUG: Starting house_generator.sample() for house {i}")
+                    import sys; sys.stdout.flush()
                     house, _ = house_generator.sample()
+                    print(f"DEBUG: house_generator.sample() completed for house {i}")
+                    import sys; sys.stdout.flush()
                     house.validate(house_generator.controller)
+                    print(f"DEBUG: house.validate() completed for house {i}")
+                    import sys; sys.stdout.flush()
 
                     # Skip houses with warnings and retry
                     if house.data.get("metadata", {}).get("warnings"):
+                        print(f"DEBUG: House {i} has warnings: {house.data.get('metadata', {}).get('warnings')}")
                         retries += 1
+                        if retries >= max_retries:
+                            logger.warning(f"House {i} failed due to warnings after {max_retries} retries")
+                            failed_count += 1
                         continue
 
                     # Validate final room proportions (after all processing)
                     passed, reason = validate_final_proportions(house)
+                    print(f"DEBUG: House {i} proportion check: passed={passed}, reason={reason}")
+                    import sys; sys.stdout.flush()
                     if not passed:
                         logger.debug(f"House {i} failed proportion check: {reason}")
                         retries += 1
@@ -312,6 +360,18 @@ def main() -> int:
         default="./images/",
         help="Directory to save images (only used with --save-images).",
     )
+    parser.add_argument(
+        "--bedrooms",
+        type=int,
+        default=None,
+        help="Constrain to houses with exactly this many bedrooms.",
+    )
+    parser.add_argument(
+        "--bathrooms",
+        type=int,
+        default=None,
+        help="Constrain to houses with exactly this many bathrooms.",
+    )
 
     args = parser.parse_args()
 
@@ -326,6 +386,8 @@ def main() -> int:
         max_retries=args.max_retries,
         save_images=args.save_images,
         image_dir=args.image_dir,
+        bedrooms=args.bedrooms,
+        bathrooms=args.bathrooms,
     )
 
     if not houses:

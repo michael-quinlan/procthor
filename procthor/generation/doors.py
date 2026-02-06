@@ -303,25 +303,37 @@ def default_add_doors(
     split: Split,
 ) -> Dict[int, List[Polygon]]:
     """Add doors to the house."""
+    from procthor.constants import EMPTY_ROOM_ID
+    print("[DOORS] Starting default_add_doors", flush=True)
     assert split in {"train", "val", "test"}
 
     room_spec = partial_house.room_spec
     boundary_groups = partial_house.house_structure.boundary_groups
-    neighboring_rooms = set(boundary_groups.keys())
+    # Filter out boundary groups that contain EMPTY_ROOM_ID (0) - these are unfilled cells, not real rooms
+    neighboring_rooms = set(
+        k for k in boundary_groups.keys()
+        if EMPTY_ROOM_ID not in k
+    )
+    print(f"[DOORS] neighboring_rooms={neighboring_rooms}", flush=True)
 
     # First, get doors required by connectivity rules
+    print("[DOORS] Getting required_doors...", flush=True)
     required_doors = get_required_doors(
         neighboring_rooms=neighboring_rooms,
         room_type_map=room_spec.room_type_map,
     )
+    print(f"[DOORS] required_doors={required_doors}", flush=True)
 
     # Then, get doors from the room spec hierarchy (for connectivity within MetaRooms)
+    print("[DOORS] Getting room_spec_neighbors...", flush=True)
     room_spec_neighbors = get_room_spec_neighbors(room_spec=room_spec.spec)
+    print("[DOORS] Calling select_openings...", flush=True)
     hierarchy_openings = select_openings(
         neighboring_rooms=neighboring_rooms,
         room_spec_neighbors=room_spec_neighbors,
         room_spec=room_spec,
     )
+    print(f"[DOORS] hierarchy_openings={hierarchy_openings}", flush=True)
 
     # Filter required_doors to remove any bedroom-kitchen doors
     # (should not happen normally, but ensure constraint is enforced)
@@ -377,19 +389,23 @@ def default_add_doors(
             if room2_type == "Bathroom":
                 bathrooms_with_doors.add(opening[1])
 
+    print("[DOORS] Calling select_door_walls for openings", flush=True)
     door_walls = select_door_walls(
         openings=all_openings,
         boundary_groups=boundary_groups,
     )
 
+    print("[DOORS] Calling select_outdoor_openings", flush=True)
     outdoor_openings = select_outdoor_openings(
         boundary_groups=boundary_groups, room_type_map=room_spec.room_type_map
     )
+    print("[DOORS] Calling select_door_walls for outdoor", flush=True)
     outdoor_walls = select_door_walls(
         openings=outdoor_openings,
         boundary_groups=boundary_groups,
     )
 
+    print("[DOORS] Calling add_door_meta", flush=True)
     door_walls.update(outdoor_walls)
     polygons_to_subtract = add_door_meta(
         partial_house=partial_house,
@@ -400,6 +416,7 @@ def default_add_doors(
         boundary_groups=boundary_groups,
         pt_db=pt_db,
     )
+    print("[DOORS] add_door_meta complete", flush=True)
     return polygons_to_subtract
 
 
@@ -407,8 +424,11 @@ def select_outdoor_openings(
     boundary_groups: BoundaryGroups, room_type_map: Dict[int, str]
 ) -> List[Tuple[int, int]]:
     """Select which rooms have doors to the outside."""
+    from procthor.constants import EMPTY_ROOM_ID
+    # Filter out boundary groups that contain EMPTY_ROOM_ID (0) - these are unfilled cells, not real rooms
     outdoor_candidates = [
-        group for group in boundary_groups if OUTDOOR_ROOM_ID in group
+        group for group in boundary_groups
+        if OUTDOOR_ROOM_ID in group and EMPTY_ROOM_ID not in group
     ]
     random.shuffle(outdoor_candidates)
 
@@ -547,11 +567,15 @@ def select_openings(
 
         # NOTE: indexes that still need connecting rooms
         need_connections_between = list(range(len(group_neighbors)))
-        while need_connections_between:
+        max_iterations = len(need_connections_between) * 100  # Safety limit
+        iteration = 0
+        while need_connections_between and iteration < max_iterations:
+            iteration += 1
             next_room_i = random.choice(need_connections_between)
             other_room_is = [i for i in range(len(group_neighbors)) if i != next_room_i]
             random.shuffle(other_room_is)
             n1_subgroup = group_neighbors[next_room_i]
+            found_connection = False
             for other_room_i in other_room_is:
                 n2_subgroup = group_neighbors[other_room_i]
                 combos = [
@@ -569,7 +593,18 @@ def select_openings(
                             need_connections_between.remove(next_room_i)
                         if other_room_i in need_connections_between:
                             need_connections_between.remove(other_room_i)
+                        found_connection = True
                         break
+                if found_connection:
+                    break
+
+            # If we couldn't find any connection for this room, remove it to avoid infinite loop
+            if not found_connection and next_room_i in need_connections_between:
+                logging.warning(f"Could not find connection for room group {next_room_i}, skipping")
+                need_connections_between.remove(next_room_i)
+
+        if iteration >= max_iterations:
+            logging.warning(f"select_openings exceeded max iterations, returning partial result")
 
     return selected_doors
 
@@ -1128,7 +1163,28 @@ def add_door_meta(
 
         wall_map = {wall["id"]: wall for wall in partial_house.walls}
 
-        wall_0 = next(w for w in partial_house.walls if w["id"] == wall_0_id)
+        # Find wall_0 - try exact match first, then fuzzy match on coordinates
+        wall_0 = next((w for w in partial_house.walls if w["id"] == wall_0_id), None)
+        if wall_0 is None:
+            # Try fuzzy match - wall coordinates may differ slightly due to float precision
+            for w in partial_house.walls:
+                if w["id"].startswith(f"wall|{boundary[0]}|"):
+                    # Check if coordinates are close enough
+                    w_parts = w["id"].split("|")
+                    if len(w_parts) >= 6:
+                        try:
+                            w_min_x, w_min_z = float(w_parts[2]), float(w_parts[3])
+                            w_max_x, w_max_z = float(w_parts[4]), float(w_parts[5])
+                            if (abs(w_min_x - min_x_wall) < 0.1 and abs(w_min_z - min_z_wall) < 0.1 and
+                                abs(w_max_x - max_x_wall) < 0.1 and abs(w_max_z - max_z_wall) < 0.1):
+                                wall_0 = w
+                                break
+                        except (ValueError, IndexError):
+                            continue
+
+        if wall_0 is None:
+            raise KeyError(wall_0_id)
+
         wall_1 = next((w for w in partial_house.walls if w["id"] == wall_1_id), None)
 
         # NOTE: a hole appears in the wall if openXSize is used from the Unity side.

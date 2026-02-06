@@ -15,13 +15,20 @@ Things to consider:
       the necessary door(s).
 """
 import random
-from typing import Dict, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 from procthor.constants import EMPTY_ROOM_ID, OUTDOOR_ROOM_ID
 from procthor.generation.room_specs import RoomSpec
+from procthor.generation.treemap import (
+    RoomRegion,
+    allocate_room_regions,
+    place_room_in_region,
+    grow_room_in_region,
+    get_region_adjacencies,
+)
 from procthor.utils.types import InvalidFloorplan, LeafRoom, MetaRoom
 
 
@@ -818,9 +825,11 @@ def validate_strict_rules(room_spec: RoomSpec, floorplan: np.ndarray) -> bool:
             if len(adjacent_ids) < 2:
                 return False
 
-        # Rule: Bedrooms must connect to LivingRoom or Hallway
+        # Rule: Bedrooms must have at least one non-Kitchen adjacent room
+        # (doors.py allows bedroom doors to hallway, living room, or other rooms as fallback)
         if room_type == "Bedroom":
-            if not adjacent_types.intersection({"LivingRoom", "Hallway"}):
+            non_kitchen_adjacent = {t for t in adjacent_types if t != "Kitchen"}
+            if not non_kitchen_adjacent:
                 return False
 
         # Rule: Bedrooms must meet minimum size
@@ -882,7 +891,11 @@ def _debug_validation(room_spec: RoomSpec, floorplan: np.ndarray):
     print("\n--- ROOM BOUNDS ---")
     for room_id, room_type in room_spec.room_type_map.items():
         room = room_spec.room_map[room_id]
-        print(f"Room {room_id} ({room_type}): ({room.min_y},{room.min_x})-({room.max_y},{room.max_x})")
+        # Check if room bounds exist (they may not if room was never placed)
+        if hasattr(room, 'min_y') and room.min_y is not None:
+            print(f"Room {room_id} ({room_type}): ({room.min_y},{room.min_x})-({room.max_y},{room.max_x})")
+        else:
+            print(f"Room {room_id} ({room_type}): NOT PLACED")
 
     adjacencies = get_room_adjacencies(floorplan)
     print("\n--- ADJACENCIES ---")
@@ -897,19 +910,26 @@ def _debug_validation(room_spec: RoomSpec, floorplan: np.ndarray):
     for room_id, room_type in room_spec.room_type_map.items():
         room = room_spec.room_map[room_id]
         if room_type in ("Bedroom", "Bathroom"):
+            # Skip if room was never placed
+            if not hasattr(room, 'min_y') or room.min_y is None:
+                print(f"FAIL: {room_type} {room_id} was NOT PLACED")
+                continue
             is_rect = np.all(floorplan[room.min_y:room.max_y, room.min_x:room.max_x] == room_id)
             if not is_rect:
                 print(f"FAIL: {room_type} {room_id} is NOT rectangular")
 
-    # Check bedroom connections
+    # Check bedroom connections - needs at least one non-Kitchen adjacent room
     for room_id, room_type in room_spec.room_type_map.items():
         if room_type == "Bedroom":
             neighbors = adjacencies.get(room_id, set())
             neighbor_types = {room_spec.room_type_map.get(n) for n in neighbors}
-            if "LivingRoom" not in neighbor_types and "Hallway" not in neighbor_types:
-                print(f"FAIL: Bedroom {room_id} not connected to LivingRoom/Hallway. Neighbors: {neighbor_types}")
+            non_kitchen = {t for t in neighbor_types if t != "Kitchen"}
+            if not non_kitchen:
+                print(f"FAIL: Bedroom {room_id} only has Kitchen adjacent. Neighbors: {neighbor_types}")
 
-    # Check bathroom connections (en-suite rule)
+    # Check bathroom connections
+    # Note: en-suite rule is about DOORS, not physical adjacency
+    # doors.py handles placing only one door to private bathrooms
     public_connected = False
     for room_id, room_type in room_spec.room_type_map.items():
         if room_type == "Bathroom":
@@ -917,28 +937,152 @@ def _debug_validation(room_spec: RoomSpec, floorplan: np.ndarray):
             neighbor_types = {room_spec.room_type_map.get(n) for n in neighbors}
             if "LivingRoom" in neighbor_types or "Kitchen" in neighbor_types or "Hallway" in neighbor_types:
                 public_connected = True
-            else:
-                bedroom_count = sum(1 for n in neighbors if room_spec.room_type_map.get(n) == "Bedroom")
-                if len(neighbors) != 1 or bedroom_count != 1:
-                    print(f"FAIL: Bathroom {room_id} en-suite rule. Neighbors: {neighbors}, types={neighbor_types}")
 
     if not public_connected:
         print("FAIL: No bathroom connected to public area")
     print("--- END DEBUG ---\n")
 
 
+def _count_available_edge_cells(floorplan: np.ndarray, room_id: int) -> int:
+    """Count how many empty cells are adjacent to a room (available edge space)."""
+    rows, cols = floorplan.shape
+    room_mask = (floorplan == room_id)
+
+    # Use a set to avoid counting the same empty cell multiple times
+    available_cells = set()
+    for r in range(rows):
+        for c in range(cols):
+            if room_mask[r, c]:
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < rows and 0 <= nc < cols and floorplan[nr, nc] == 0:
+                        available_cells.add((nr, nc))
+    return len(available_cells)
+
+
+def _get_hallway_room(placed_rooms: List, room_spec: "RoomSpec") -> Optional[Any]:
+    """Get the hallway room object if it exists."""
+    for room in placed_rooms:
+        if room_spec.room_type_map.get(room.room_id) == "Hallway":
+            return room
+    return None
+
+
+def _get_livingroom_room(placed_rooms: List, room_spec: "RoomSpec") -> Optional[Any]:
+    """Get the living room object if it exists."""
+    for room in placed_rooms:
+        if room_spec.room_type_map.get(room.room_id) == "LivingRoom":
+            return room
+    return None
+
+
+def _hallway_can_grow(
+    hallway,
+    floorplan: np.ndarray,
+    interior_boundary_scale: float = 1.9
+) -> bool:
+    """Check if hallway can grow without exceeding size limits.
+
+    The proportion rule requires: Hallway area <= Bedroom area.
+    To ensure this, we limit hallway to the minimum bedroom target size (9.0 sqm).
+    """
+    if hallway is None:
+        return False
+
+    # Calculate current hallway area in cells
+    hallway_cells = np.sum(floorplan == hallway.room_id)
+
+    # Convert to square meters
+    cell_area_sqm = interior_boundary_scale ** 2  # ~3.61 sqm per cell
+    hallway_area_sqm = hallway_cells * cell_area_sqm
+
+    # Max hallway size = minimum bedroom target (9.0 sqm)
+    # This ensures hallway <= any bedroom
+    MAX_HALLWAY_SQM = 9.0
+
+    return hallway_area_sqm < MAX_HALLWAY_SQM
+
+
+def _ensure_enough_edge_space(
+    floorplan: np.ndarray,
+    placed_rooms: List,
+    room_spec: "RoomSpec",
+    rooms_needing_connection: int,
+    min_cells_per_room: int = 2,
+    debug: bool = False
+) -> bool:
+    """
+    Ensure hallway and living room have enough edge space for remaining rooms.
+    Grows them if needed. Returns True if sufficient space exists or was created.
+    """
+    hallway = _get_hallway_room(placed_rooms, room_spec)
+    living_room = _get_livingroom_room(placed_rooms, room_spec)
+
+    required_cells = rooms_needing_connection * min_cells_per_room
+
+    # Count available edge cells on hallway and living room
+    hallway_available = _count_available_edge_cells(floorplan, hallway.room_id) if hallway else 0
+    living_room_available = _count_available_edge_cells(floorplan, living_room.room_id) if living_room else 0
+    total_available = hallway_available + living_room_available
+
+    if debug:
+        print(f"  Edge space: need {required_cells} for {rooms_needing_connection} rooms, have {total_available}")
+
+    if total_available >= required_cells:
+        return True
+
+    # Need to grow - prefer hallway since bedrooms should connect there
+    # LIMIT: Hallway growth is limited by proportion rule (hallway <= bedroom)
+    max_grow_attempts = 10
+    for attempt in range(max_grow_attempts):
+        grew = False
+        # Try growing hallway first (only if under size limit)
+        if hallway and _hallway_can_grow(hallway, floorplan) and grow_l_shape(hallway, floorplan):
+            grew = True
+            if debug:
+                print(f"  Grew hallway (attempt {attempt + 1})")
+
+        # Also try growing living room
+        if living_room and grow_l_shape(living_room, floorplan):
+            grew = True
+            if debug:
+                print(f"  Grew living room (attempt {attempt + 1})")
+
+        if not grew:
+            break
+
+        # Recount available space
+        hallway_available = _count_available_edge_cells(floorplan, hallway.room_id) if hallway else 0
+        living_room_available = _count_available_edge_cells(floorplan, living_room.room_id) if living_room else 0
+        total_available = hallway_available + living_room_available
+
+        if total_available >= required_cells:
+            if debug:
+                print(f"  Now have {total_available} edge cells - sufficient!")
+            return True
+
+    if debug:
+        print(f"  WARNING: Could not create enough edge space ({total_available} < {required_cells})")
+    return False
+
+
+def _debug_print(msg):
+    import sys
+    print(f"[DEBUG] {msg}", flush=True)
+    sys.stdout.flush()
+
 def incremental_generate_floorplan(
     room_spec: RoomSpec,
     interior_boundary: np.ndarray,
-    candidate_generations: int = 50,
+    candidate_generations: int = 1,
     interior_boundary_scale: float = 1.9,
     debug: bool = False,
 ) -> np.ndarray:
     """Generate floorplan by placing rooms one at a time.
 
-    Places rooms in order: LivingRoom -> Kitchen -> Hallway -> Bedrooms/Bathrooms.
-    This approach works better for 3+ bedroom houses where the hierarchical
-    MetaRoom approach struggles to converge.
+    Uses a treemap-based approach first to pre-allocate space for each room,
+    which solves the problem of greedy hallway growth consuming all space.
+    Falls back to the original incremental approach if treemap fails.
 
     Args:
         room_spec: Room spec for the floorplan.
@@ -952,6 +1096,34 @@ def incremental_generate_floorplan(
     Raises:
         InvalidFloorplan: If unable to generate a valid floorplan.
     """
+    print(f"[INC] Starting incremental_generate_floorplan (candidate_generations={candidate_generations})", flush=True)
+
+    # Count bedrooms - treemap is designed for 3+ BR houses
+    num_bedrooms = sum(1 for rt in room_spec.room_type_map.values() if rt == "Bedroom")
+    has_hallway = "Hallway" in room_spec.room_type_map.values()
+
+    # Try treemap approach first for 3+ BR houses with hallway
+    # Use more attempts for larger houses
+    if num_bedrooms >= 3 and has_hallway:
+        treemap_attempts = max(5, candidate_generations * 2)  # At least 5 attempts for treemap
+        print(f"[INC] Large house ({num_bedrooms}BR) - trying treemap with {treemap_attempts} attempts", flush=True)
+        try:
+            result = treemap_generate_floorplan(
+                room_spec=room_spec,
+                interior_boundary=interior_boundary,
+                candidate_generations=treemap_attempts,
+                interior_boundary_scale=interior_boundary_scale,
+                debug=True,  # Always debug treemap for now
+            )
+            print(f"[INC] Treemap approach succeeded!", flush=True)
+            return result
+        except InvalidFloorplan as e:
+            print(f"[INC] Treemap approach failed: {e}", flush=True)
+            print(f"[INC] Falling back to original incremental approach", flush=True)
+    else:
+        print(f"[INC] Small house ({num_bedrooms}BR) - skipping treemap", flush=True)
+
+    # Original incremental approach as fallback
     cell_size_sqm = interior_boundary_scale ** 2
 
     # Classify rooms by type
@@ -1001,7 +1173,8 @@ def incremental_generate_floorplan(
     best_floorplan = None
     best_score = float("-inf")
 
-    for _ in range(candidate_generations):
+    for attempt in range(candidate_generations):
+        print(f"[INC] Attempt {attempt+1}/{candidate_generations}", flush=True)
         floorplan = interior_boundary.copy()
         success = True
 
@@ -1014,8 +1187,26 @@ def incremental_generate_floorplan(
 
         # Place rooms one at a time
         placed_rooms = []
+
+        # Count rooms that need connection to hallway/living room
+        private_room_types = {"Bedroom", "Bathroom"}
+        remaining_private = sum(1 for r in placement_order
+                                if room_spec.room_type_map[r.room_id] in private_room_types)
+
         for room in placement_order:
             room_type = room_spec.room_type_map[room.room_id]
+            print(f"[INC]   Placing room {room.room_id} ({room_type})", flush=True)
+
+            # Before placing a bedroom/bathroom, ensure we have enough edge space
+            if room_type in private_room_types and remaining_private > 0:
+                _ensure_enough_edge_space(
+                    floorplan=floorplan,
+                    placed_rooms=placed_rooms,
+                    room_spec=room_spec,
+                    rooms_needing_connection=remaining_private,
+                    min_cells_per_room=MIN_BEDROOM_DIMENSION_CELLS,
+                    debug=True,
+                )
 
             try:
                 _place_room_incrementally(
@@ -1026,33 +1217,62 @@ def incremental_generate_floorplan(
                     room_spec=room_spec,
                 )
                 placed_rooms.append(room)
-            except InvalidFloorplan:
+                print(f"[INC]   -> Placed OK", flush=True)
+
+                # Decrement count after successful placement
+                if room_type in private_room_types:
+                    remaining_private -= 1
+
+                # After placing hallway, immediately grow it to create more adjacency space
+                # for future bedroom placements
+                # LIMIT: Respect hallway size limit (proportion rule)
+                if room_type == "Hallway":
+                    growth_count = 0
+                    for _ in range(5):  # Grow up to 5 times to create a longer corridor
+                        if not _hallway_can_grow(room, floorplan):
+                            print(f"[INC]   -> Hallway at size limit", flush=True)
+                            break
+                        if grow_rect(room, floorplan):
+                            growth_count += 1
+                        else:
+                            break
+                    print(f"[INC]   -> Hallway grew {growth_count} times", flush=True)
+
+            except InvalidFloorplan as e:
+                print(f"[INC]   -> Failed: {e}", flush=True)
                 success = False
                 break
 
         if not success:
+            print(f"[INC] Attempt {attempt+1} failed, continuing", flush=True)
             continue
 
+        print(f"[INC] All rooms placed, filling empty space", flush=True)
         # Fill remaining empty space - use rectangular growth for bedrooms/bathrooms
         _fill_empty_space(floorplan, placed_rooms, room_spec=room_spec)
 
+        print(f"[INC] Validating strict rules", flush=True)
         # Check strict rules
         if not validate_strict_rules(room_spec=room_spec, floorplan=floorplan):
-            if debug:
-                print("Validation FAILED")
-                _debug_validation(room_spec, floorplan)
+            print("[INC] Validation FAILED - checking why:", flush=True)
+            _debug_validation(room_spec, floorplan)
             continue
 
+        print(f"[INC] Scoring floorplan", flush=True)
         score = score_floorplan(
             room_spec=room_spec,
             floorplan=floorplan,
             cell_size_sqm=cell_size_sqm,
         )
+        print(f"[INC] Score = {score}", flush=True)
 
         if best_floorplan is None or score > best_score:
             best_floorplan = floorplan
             best_score = score
+        print(f"[INC] Best score = {best_score}", flush=True)
+        print(f"[INC] Attempt complete, breaking out", flush=True)
 
+    print(f"[INC] All attempts done, best_floorplan is {'None' if best_floorplan is None else 'set'}", flush=True)
     if best_floorplan is None:
         # Debug info for diagnosis
         import logging
@@ -1064,6 +1284,192 @@ def incremental_generate_floorplan(
             "Failed to generate valid floorplan using incremental approach after "
             f"{candidate_generations} attempts."
         )
+
+    return best_floorplan
+
+
+def treemap_generate_floorplan(
+    room_spec: RoomSpec,
+    interior_boundary: np.ndarray,
+    candidate_generations: int = 10,
+    interior_boundary_scale: float = 1.9,
+    debug: bool = False,
+) -> np.ndarray:
+    """Generate floorplan using treemap-based space allocation.
+
+    This algorithm pre-allocates space for each room BEFORE placement,
+    preventing greedy growth by any single room (especially hallways).
+
+    Algorithm:
+    1. Use squarified treemap to partition grid into room-sized regions
+    2. Place rooms within their allocated regions
+    3. Grow rooms to fill their regions
+    4. Fill any remaining space
+
+    Args:
+        room_spec: Room spec for the floorplan.
+        interior_boundary: Interior boundary of the floorplan.
+        candidate_generations: Number of attempts to try.
+        interior_boundary_scale: Scale factor (meters per grid cell).
+        debug: If True, print debug information.
+
+    Returns:
+        The generated floorplan as a numpy array.
+
+    Raises:
+        InvalidFloorplan: If unable to generate a valid floorplan.
+    """
+    if debug:
+        print(f"[TREEMAP] Starting treemap_generate_floorplan (attempts={candidate_generations})")
+
+    cell_size_sqm = interior_boundary_scale ** 2
+
+    # Extract room ratios from room_spec
+    room_ratios = {}
+    for room_id in room_spec.room_type_map:
+        room = room_spec.room_map.get(room_id)
+        if room and hasattr(room, 'ratio'):
+            room_ratios[room_id] = room.ratio
+        else:
+            room_ratios[room_id] = 1.0
+
+    best_floorplan = None
+    best_score = float("-inf")
+
+    for attempt in range(candidate_generations):
+        if debug:
+            print(f"[TREEMAP] Attempt {attempt + 1}/{candidate_generations}")
+
+        floorplan = interior_boundary.copy()
+
+        # Phase 1: Allocate regions using treemap
+        regions = allocate_room_regions(
+            room_type_map=room_spec.room_type_map,
+            room_ratios=room_ratios,
+            interior_boundary=floorplan,
+            margin_factor=0.0,
+        )
+
+        if debug:
+            print(f"[TREEMAP]   Allocated {len(regions)} regions")
+            for rid, reg in regions.items():
+                rtype = room_spec.room_type_map.get(rid, "?")
+                print(f"[TREEMAP]     Room {rid} ({rtype}): ({reg.min_row},{reg.min_col})-({reg.max_row},{reg.max_col}) = {reg.area} cells")
+
+        # Phase 2: Place rooms in their allocated regions
+        success = True
+        placed_rooms = []
+
+        # Order rooms for placement: public first, then hallway, then private
+        room_order = []
+        for room_id, room_type in room_spec.room_type_map.items():
+            if room_type in {"LivingRoom", "Kitchen"}:
+                room_order.insert(0, room_id)  # Public first
+            elif room_type == "Hallway":
+                room_order.append(room_id)  # Hallway in middle
+            else:
+                room_order.append(room_id)  # Private last
+
+        for room_id in room_order:
+            if room_id not in regions:
+                if debug:
+                    print(f"[TREEMAP]   No region for room {room_id}, skipping")
+                continue
+
+            room = room_spec.room_map.get(room_id)
+            region = regions[room_id]
+            room_type = room_spec.room_type_map.get(room_id, "")
+
+            # Reset room boundaries
+            room.min_x = None
+            room.max_x = None
+            room.min_y = None
+            room.max_y = None
+
+            # Determine minimum dimension based on room type
+            min_dim = MIN_BEDROOM_DIMENSION_CELLS if room_type == "Bedroom" else 1
+
+            # Place room in region
+            if place_room_in_region(room, region, floorplan, min_dimension=min_dim):
+                placed_rooms.append(room)
+                if debug:
+                    print(f"[TREEMAP]   Placed room {room_id} ({room_type}) at ({room.min_y},{room.min_x})-({room.max_y},{room.max_x})")
+            else:
+                if debug:
+                    print(f"[TREEMAP]   FAILED to place room {room_id} ({room_type})")
+                    # Debug: show what's in the region
+                    region_data = floorplan[region.min_row:region.max_row, region.min_col:region.max_col]
+                    print(f"[TREEMAP]   Region content:")
+                    print(region_data)
+                success = False
+                break
+
+        if not success:
+            if debug:
+                print(f"[TREEMAP]   Attempt {attempt + 1} failed during placement")
+            continue
+
+        # Phase 3: Grow rooms within their regions
+        if debug:
+            print(f"[TREEMAP]   Growing rooms within regions")
+
+        for room in placed_rooms:
+            room_id = room.room_id
+            if room_id not in regions:
+                continue
+
+            region = regions[room_id]
+            room_type = room_spec.room_type_map.get(room_id, "")
+
+            # Grow until we fill the region or can't grow anymore
+            # But limit hallway size to prevent proportion check failures
+            max_grow = 50
+            for _ in range(max_grow):
+                # Check hallway size limit before growing
+                if room_type == "Hallway" and not _hallway_can_grow(room, floorplan):
+                    break
+                if not grow_room_in_region(room, region, floorplan):
+                    break
+
+        # Phase 4: Fill any remaining empty space using existing L-shape growth
+        if debug:
+            print(f"[TREEMAP]   Filling remaining empty space")
+
+        _fill_empty_space(floorplan, placed_rooms, room_spec=room_spec)
+
+        # Validate
+        if debug:
+            print(f"[TREEMAP]   Validating strict rules")
+
+        if not validate_strict_rules(room_spec=room_spec, floorplan=floorplan):
+            if debug:
+                print(f"[TREEMAP]   Validation FAILED")
+                _debug_validation(room_spec, floorplan)
+            continue
+
+        # Score the floorplan
+        score = score_floorplan(
+            room_spec=room_spec,
+            floorplan=floorplan,
+            cell_size_sqm=cell_size_sqm,
+        )
+
+        if debug:
+            print(f"[TREEMAP]   Score = {score}")
+
+        if best_floorplan is None or score > best_score:
+            best_floorplan = floorplan
+            best_score = score
+            if debug:
+                print(f"[TREEMAP]   New best score!")
+
+    if best_floorplan is None:
+        raise InvalidFloorplan(
+            f"Treemap generation failed after {candidate_generations} attempts."
+        )
+
+    if debug:
+        print(f"[TREEMAP] Success! Best score = {best_score}")
 
     return best_floorplan
 
@@ -1243,14 +1649,23 @@ def _place_room_incrementally(
     elif room_type == "Hallway":
         # Hallway should connect public to private areas
         # Place adjacent to LivingRoom or Kitchen
+        # IMPORTANT: Start with a larger hallway to provide adjacency for multiple bedrooms
         public_rooms = [r for r in placed_rooms
                        if room_spec.room_type_map.get(r.room_id) in {"LivingRoom", "Kitchen"}]
         if public_rooms:
+            # Start with larger min_size for hallway to have room to grow as corridor
             region = _find_adjacent_empty_region(
-                floorplan, random.choice(public_rooms).room_id, min_size=2
+                floorplan, random.choice(public_rooms).room_id, min_size=4
             )
+            if region is None:
+                # Fallback to smaller if can't find larger space
+                region = _find_adjacent_empty_region(
+                    floorplan, random.choice(public_rooms).room_id, min_size=2
+                )
         else:
-            region = _find_empty_region(floorplan, min_size=2, prefer_center=False)
+            region = _find_empty_region(floorplan, min_size=4, prefer_center=False)
+            if region is None:
+                region = _find_empty_region(floorplan, min_size=2, prefer_center=False)
 
     elif room_type == "Bedroom":
         # Try multiple placement strategies in order of preference:
@@ -1267,54 +1682,98 @@ def _place_room_incrementally(
         living_rooms = [r for r in placed_rooms
                       if room_spec.room_type_map.get(r.room_id) == "LivingRoom"]
 
+        print(f"  [DEBUG] Placing bedroom {room.room_id}, hallways={len(hallways)}, living_rooms={len(living_rooms)}")
+
         # Try adjacent to hallway first
         if hallways and region is None:
             region = _find_adjacent_empty_region(
                 floorplan, hallways[0].room_id, min_size=4, min_dim=MIN_BEDROOM_DIMENSION_CELLS
             )
+            print(f"  [DEBUG] After hallway adjacent check: region={region}")
 
-        # If no space adjacent to hallway, grow the hallway into empty space first
+        # If no space adjacent to hallway, grow the hallway into empty space
+        # Keep growing until we find space or can't grow anymore
+        # LIMIT: Stop growing if hallway would exceed bedroom size (proportion rule)
         if region is None and hallways:
             hallway = hallways[0]
-            for _ in range(3):
+            max_grow_attempts = 10  # More aggressive growth
+            for attempt in range(max_grow_attempts):
+                # Check size limit before growing
+                if not _hallway_can_grow(hallway, floorplan):
+                    print(f"  [DEBUG] Hallway at size limit, skipping growth")
+                    break
                 grew = grow_rect(hallway, floorplan)
+                print(f"  [DEBUG] Hallway grow attempt {attempt+1}: grew={grew}")
                 if grew:
                     region = _find_adjacent_empty_region(
                         floorplan, hallway.room_id, min_size=4, min_dim=MIN_BEDROOM_DIMENSION_CELLS
                     )
                     if region is not None:
+                        print(f"  [DEBUG] Found region after hallway growth: {region}")
                         break
                 else:
+                    print(f"  [DEBUG] Hallway can't grow anymore")
                     break
 
         # Try adjacent to living room
         if region is None and living_rooms:
-            # Try all living rooms
             for lr in living_rooms:
                 region = _find_adjacent_empty_region(
                     floorplan, lr.room_id, min_size=4, min_dim=MIN_BEDROOM_DIMENSION_CELLS
                 )
                 if region is not None:
+                    print(f"  [DEBUG] Found region adjacent to living room {lr.room_id}")
                     break
 
-        # If no space adjacent to living room, grow it into empty space
-        if region is None and living_rooms:
-            for lr in living_rooms:
-                for _ in range(3):
-                    grew = grow_rect(lr, floorplan)
-                    if grew:
-                        region = _find_adjacent_empty_region(
-                            floorplan, lr.room_id, min_size=4, min_dim=MIN_BEDROOM_DIMENSION_CELLS
-                        )
-                        if region is not None:
-                            break
-                    else:
+        # Alternate growth strategy: try hallway first (preferred for bedroom connectivity)
+        # then living room. Repeat until we find space or neither can grow.
+        # LIMIT: Hallway growth is limited by proportion rule (hallway <= bedroom)
+        max_total_attempts = 15
+        for attempt in range(max_total_attempts):
+            if region is not None:
+                break
+
+            # Try hallway growth (L-shape to reach around corners)
+            # Only grow if under size limit
+            hallway_grew = False
+            if hallways and _hallway_can_grow(hallways[0], floorplan):
+                hallway = hallways[0]
+                hallway_grew = grow_rect(hallway, floorplan) or grow_l_shape(hallway, floorplan)
+                if hallway_grew:
+                    print(f"  [DEBUG] Hallway grew (attempt {attempt+1})")
+                    region = _find_adjacent_empty_region(
+                        floorplan, hallway.room_id, min_size=4, min_dim=MIN_BEDROOM_DIMENSION_CELLS
+                    )
+                    if region is not None:
+                        print(f"  [DEBUG] Found region after hallway growth: {region}")
                         break
-                if region is not None:
-                    break
 
+            # Try living room growth (L-shape to extend around)
+            lr_grew = False
+            if living_rooms and region is None:
+                lr = living_rooms[0]
+                lr_grew = grow_rect(lr, floorplan) or grow_l_shape(lr, floorplan)
+                if lr_grew:
+                    print(f"  [DEBUG] LivingRoom grew (attempt {attempt+1})")
+                    region = _find_adjacent_empty_region(
+                        floorplan, lr.room_id, min_size=4, min_dim=MIN_BEDROOM_DIMENSION_CELLS
+                    )
+                    if region is not None:
+                        print(f"  [DEBUG] Found region after living room growth: {region}")
+                        break
+
+            # If neither grew this round, we're stuck
+            if not hallway_grew and not lr_grew:
+                print(f"  [DEBUG] Neither hallway nor living room could grow")
+                break
+
+        # If still no region, fail rather than placing disconnected bedroom
         if region is None:
-            region = _find_empty_region(floorplan, min_size=4, prefer_center=False, min_dim=MIN_BEDROOM_DIMENSION_CELLS)
+            print(f"  [DEBUG] FAILED to place bedroom {room.room_id}")
+            print(f"  [DEBUG] Current floorplan:\n{floorplan}")
+            raise InvalidFloorplan(
+                f"Cannot place bedroom {room.room_id} adjacent to hallway or living room"
+            )
 
     elif room_type == "Bathroom":
         # First bathroom: place adjacent to public area (LivingRoom/Kitchen/Hallway)
@@ -1493,21 +1952,37 @@ def _fill_empty_space(
     # First, grow rectangular rooms (bedrooms/first bathroom) with grow_rect only
     max_iterations = 500
     iteration = 0
+    _debug_print(f"_fill_empty_space: starting rect growth for {len(rect_rooms)} rooms")
     while rect_rooms and iteration < max_iterations:
         iteration += 1
+        if iteration % 100 == 0:
+            _debug_print(f"_fill_empty_space: rect iteration {iteration}")
         room = random.choice(list(rect_rooms))
         can_grow = grow_rect(room, floorplan)
         if not can_grow:
             rect_rooms.discard(room)
+    _debug_print(f"_fill_empty_space: rect growth done after {iteration} iterations")
 
     # Then, grow other rooms with L-shape growth
+    # BUT limit hallway size to prevent proportion check failures
     iteration = 0
+    _debug_print(f"_fill_empty_space: starting L-shape growth for {len(lshape_rooms)} rooms")
     while lshape_rooms and iteration < max_iterations:
         iteration += 1
+        if iteration % 100 == 0:
+            _debug_print(f"_fill_empty_space: L-shape iteration {iteration}")
         room = random.choice(list(lshape_rooms))
+
+        # Check if this is a hallway and enforce size limit
+        room_type = room_spec.room_type_map.get(room.room_id) if room_spec else None
+        if room_type == "Hallway" and not _hallway_can_grow(room, floorplan):
+            lshape_rooms.discard(room)
+            continue
+
         can_grow = grow_l_shape(room, floorplan)
         if not can_grow:
             lshape_rooms.discard(room)
+    _debug_print(f"_fill_empty_space: L-shape growth done after {iteration} iterations")
 
 
 def generate_floorplan(

@@ -95,8 +95,12 @@ def get_boundary_strings(
             windows.
 
     """
+    from procthor.constants import EMPTY_ROOM_ID
     room_boundary_groups = defaultdict(list)
     for (room0_id, room1_id), boundary_group in boundary_groups.items():
+        # Skip boundary groups with EMPTY_ROOM_ID (0) - these are unfilled cells, not real rooms
+        if EMPTY_ROOM_ID in (room0_id, room1_id):
+            continue
         if (
             only_connected_to_outside
             and room0_id != OUTDOOR_ROOM_ID

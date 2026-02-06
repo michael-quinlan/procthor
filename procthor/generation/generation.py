@@ -204,15 +204,19 @@ def default_sample_house_structure(
         room_type == "Hallway" for room_type in room_spec.room_type_map.values()
     )
 
+    print(f"[GEN] num_bedrooms={num_bedrooms}, has_hallway={has_hallway}", flush=True)
+
     # Use incremental generator only for 3+ bedroom houses WITH a hallway
     # (the incremental approach is designed for hallway-based specs)
     if num_bedrooms >= 3 and has_hallway:
+        print("[GEN] Using INCREMENTAL generator", flush=True)
         floorplan = incremental_generate_floorplan(
             room_spec=room_spec,
             interior_boundary=interior_boundary,
             interior_boundary_scale=interior_boundary_scale,
         )
     else:
+        print("[GEN] Using STANDARD generator", flush=True)
         floorplan = generate_floorplan(
             room_spec=room_spec,
             interior_boundary=interior_boundary,
