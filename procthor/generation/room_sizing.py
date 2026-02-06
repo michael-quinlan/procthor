@@ -14,7 +14,7 @@ from dataclasses import dataclass
 ROOM_SIZE_TARGETS_SQM: Dict[str, Tuple[float, float, float]] = {
     # Room type: (min_sqm, target_sqm, max_sqm)
     "Bedroom": (9.0, 14.0, 25.0),        # 97-269 sqft, target ~150 sqft
-    "Bathroom": (3.5, 6.0, 12.0),        # 38-129 sqft, target ~65 sqft
+    "Bathroom": (3.5, 5.0, 8.0),         # 38-86 sqft, target ~54 sqft
     "Kitchen": (7.0, 12.0, 20.0),        # 75-215 sqft, target ~130 sqft
     "LivingRoom": (14.0, 22.0, 35.0),    # 150-377 sqft, target ~237 sqft
     "Hallway": (2.5, 5.0, 10.0),         # 27-108 sqft, target ~54 sqft
