@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import time
 from typing import Dict, List, Optional
 
 import matplotlib.pyplot as plt
@@ -19,6 +20,7 @@ from tqdm import tqdm
 
 from procthor.generation import HouseGenerator
 from procthor.generation.hallway_room_specs import ALL_ROOM_SPEC_SAMPLER
+from procthor.generation.validation import validate_room_proportions
 
 # Room type colors (from generate_samples.py)
 ROOM_TYPE_TO_COLOR = {
@@ -35,13 +37,16 @@ SQM_TO_SQFT = 10.7639
 
 def validate_final_proportions(house) -> tuple:
     """Validate that final room polygon proportions are sensible.
-    
+
+    This is a safety check after full generation. Early validation happens
+    in HouseGenerator.sample() after the STRUCTURE stage.
+
     Returns:
         Tuple of (passed, reason) where reason explains failure if passed=False.
     """
     # Small tolerance for floating point comparisons (0.1 m² = ~1 sqft)
     EPSILON = 0.1
-    
+
     room_areas = {}
     for room_id, room in house.rooms.items():
         room_type = room.room_type
@@ -49,31 +54,31 @@ def validate_final_proportions(house) -> tuple:
         if room_type not in room_areas:
             room_areas[room_type] = []
         room_areas[room_type].append(area)
-    
+
     living_areas = room_areas.get('LivingRoom', [])
     bedroom_areas = room_areas.get('Bedroom', [])
     hallway_areas = room_areas.get('Hallway', [])
-    
+
     if not living_areas:
         return True, ""  # No living room to validate
-    
+
     max_living = max(living_areas)
     max_bedroom = max(bedroom_areas) if bedroom_areas else 0
     min_bedroom = min(bedroom_areas) if bedroom_areas else float('inf')
     max_hallway = max(hallway_areas) if hallway_areas else 0
-    
+
     # Rule 1: LivingRoom >= any Bedroom (with epsilon tolerance)
     if max_bedroom > 0 and max_living < max_bedroom - EPSILON:
         return False, f"Living ({max_living:.1f}m²) < Bedroom ({max_bedroom:.1f}m²)"
-    
+
     # Rule 2: Hallway <= any Bedroom (with epsilon tolerance)
     if max_hallway > 0 and min_bedroom < float('inf') and max_hallway > min_bedroom + EPSILON:
         return False, f"Hallway ({max_hallway:.1f}m²) > Bedroom ({min_bedroom:.1f}m²)"
-    
+
     # Rule 3: LivingRoom >= Hallway (with epsilon tolerance)
     if max_hallway > 0 and max_living < max_hallway - EPSILON:
         return False, f"Living ({max_living:.1f}m²) < Hallway ({max_hallway:.1f}m²)"
-    
+
     return True, ""
 
 
@@ -245,14 +250,20 @@ def generate_houses(
                 try:
                     # Reset partial_house before each attempt to ensure fresh generation
                     house_generator.partial_house = None
-                    print(f"DEBUG: Starting house_generator.sample() for house {i}")
-                    import sys; sys.stdout.flush()
+
+                    # Timing instrumentation
+                    t_start = time.time()
                     house, _ = house_generator.sample()
-                    print(f"DEBUG: house_generator.sample() completed for house {i}")
-                    import sys; sys.stdout.flush()
+                    t_after_sample = time.time()
                     house.validate(house_generator.controller)
-                    print(f"DEBUG: house.validate() completed for house {i}")
-                    import sys; sys.stdout.flush()
+                    t_after_validate = time.time()
+
+                    # Calculate timing
+                    sample_time = t_after_sample - t_start
+                    validate_time = t_after_validate - t_after_sample
+                    total_time = t_after_validate - t_start
+
+                    print(f"House {i}: sample={sample_time:.1f}s, validate={validate_time:.1f}s, total={total_time:.1f}s")
 
                     # Skip houses with warnings and retry
                     if house.data.get("metadata", {}).get("warnings"):

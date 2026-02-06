@@ -7,6 +7,7 @@ Also randomizes the openness of some of the objects.
 import copy
 import logging
 import random
+import time
 from collections import defaultdict
 from typing import Dict, List
 
@@ -76,9 +77,15 @@ def default_add_small_objects(
     """Add small objects to the house."""
     controller.reset()
     controller.step(action="ResetObjectFilter")
+
+    # Timing: CreateHouse
+    create_house_start = time.time()
     event = controller.step(
         action="CreateHouse", house=partial_house.to_house_dict(), renderImage=False
     )
+    create_house_time = time.time() - create_house_start
+    print(f"[SMALL_OBJS] CreateHouse: {create_house_time:.2f}s")
+
     assert event, "Unable to CreateHouse!"
     controller.step(action="SetObjectFilter", objectIds=[])
 
@@ -115,6 +122,7 @@ def default_add_small_objects(
 
     # NOTE: Place the objects
     num_placed_object_instances = 0
+    spawn_loop_start = time.time()
     for room_id, room in rooms.items():
         if room_id not in receptacles_per_room:
             continue
@@ -298,6 +306,9 @@ def default_add_small_objects(
                         renderImage=False,
                     )
 
+    spawn_loop_time = time.time() - spawn_loop_start
+    print(f"[SMALL_OBJS] Total object spawning: {spawn_loop_time:.2f}s")
+
     # NOTE: Drop object from near ceiling so it falls
     def _set_drop_heights(objects: List[Object], obj_types):
         for obj in objects:
@@ -338,6 +349,8 @@ def default_add_small_objects(
         ]
         i = 0
         failed = False
+        physics_loop_start = time.time()
+        step_times = []
         while True:
             i += 1
             if i > 1000:
@@ -345,12 +358,22 @@ def default_add_small_objects(
                 print("Objects not settling!")
                 break
 
+            # Sample timing every 100 iterations
+            if i % 100 == 0:
+                step_start = time.time()
+
             event = controller.step(
                 action="AdvancePhysicsStep",
                 timeStep=0.01,
                 allowAutoSimulation=True,
                 renderImage=False,
             )
+
+            # Record timing for sampled iterations
+            if i % 100 == 0:
+                step_time = time.time() - step_start
+                step_times.append(step_time)
+
             objs = [
                 obj
                 for obj in event.metadata["objects"]
@@ -367,6 +390,10 @@ def default_add_small_objects(
             ):
                 break
             last_objs = objs
+
+        physics_loop_time = time.time() - physics_loop_start
+        avg_step_time = sum(step_times) / len(step_times) if step_times else 0
+        print(f"[SMALL_OBJS] Physics simulation: {physics_loop_time:.2f}s ({i} iterations, avg {avg_step_time:.4f}s per step)")
 
         if failed:
             partial_house.objects = orig_objects

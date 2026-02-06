@@ -1,6 +1,7 @@
 import copy
 import logging
 import random
+import time
 from contextlib import contextmanager
 from typing import Dict, Optional, Tuple, Union
 
@@ -20,6 +21,7 @@ from .connectivity import (
     validate_strict_door_rules,
     InvalidConnectivity,
 )
+from .validation import validate_room_proportions
 from .color_objects import default_randomize_object_colors
 from .doors import default_add_doors
 from .exterior_walls import default_add_exterior_walls
@@ -134,9 +136,16 @@ class HouseGenerator:
     ) -> Tuple[House, Dict[NextSamplingStage, PartialHouse]]:
         """Sample a house specification compatible with AI2-THOR."""
         import sys
+
+        # Initialize timing tracking
+        start_time = time.time()
+        cumulative_time = 0.0
+        stage_start_time = start_time
+
         print("[SAMPLE] Entering sample() method", file=sys.stderr, flush=True)
         if self.controller is None:
             print("[SAMPLE] Creating controller...", file=sys.stderr, flush=True)
+            controller_start = time.time()
             # NOTE: assumes images are never used by this Controller.
             self.controller = Controller(quality="Low", **PROCTHOR_INITIALIZATION)
             print("[SAMPLE] Controller created", file=sys.stderr, flush=True)
@@ -146,6 +155,10 @@ class HouseGenerator:
                     action="SetRandomSeed", seed=self.seed, renderImage=False
                 )
                 print("[SAMPLE] Seed set", file=sys.stderr, flush=True)
+            controller_duration = time.time() - controller_start
+            cumulative_time += controller_duration
+            print(f"[TIMING] Controller initialization: {controller_duration:.2f}s", flush=True)
+            print(f"[TIMING] Total so far: {cumulative_time:.2f}s", flush=True)
         else:
             print("[SAMPLE] Controller already exists", file=sys.stderr, flush=True)
 
@@ -172,6 +185,7 @@ class HouseGenerator:
             # NOTE: sample house structure via rejection sampling.
             import sys
             print("[SAMPLE] About to sample house structure", file=sys.stderr, flush=True)
+            structure_start = time.time()
             room_ids = set(room_spec.room_type_map.keys())
             for attempt in range(10):
                 print(f"[SAMPLE] House structure attempt {attempt+1}/10", flush=True)
@@ -195,7 +209,17 @@ class HouseGenerator:
                 house_structure=house_structure,
                 room_spec=room_spec,
             )
+
+            # Early validation: check room proportions before any Unity operations
+            passed, reason = validate_room_proportions(partial_house)
+            if not passed:
+                raise InvalidFloorplan(reason)
+
             partial_house.next_sampling_stage = next_sampling_stage
+            structure_duration = time.time() - structure_start
+            cumulative_time += structure_duration
+            print(f"[TIMING] STRUCTURE stage: {structure_duration:.2f}s", flush=True)
+            print(f"[TIMING] Total so far: {cumulative_time:.2f}s", flush=True)
         else:
             assert partial_house.next_sampling_stage.value > NextSamplingStage.STRUCTURE
 
@@ -217,6 +241,7 @@ class HouseGenerator:
 
         # NOTE: DOORS
         print("[SAMPLE] Starting DOORS stage", flush=True)
+        doors_start = time.time()
         if partial_house.next_sampling_stage <= NextSamplingStage.DOORS:
             with advance_and_record_partial(partial_house):
                 print("[SAMPLE] Calling add_doors...", flush=True)
@@ -267,6 +292,10 @@ class HouseGenerator:
                         "Private room access issues (non-fatal):\n"
                         + "\n".join(access_errors)
                     )
+        doors_duration = time.time() - doors_start
+        cumulative_time += doors_duration
+        print(f"[TIMING] DOORS stage: {doors_duration:.2f}s", flush=True)
+        print(f"[TIMING] Total so far: {cumulative_time:.2f}s", flush=True)
 
         print("[SAMPLE] Starting floor_polygons", flush=True)
         floor_polygons = get_floor_polygons(
@@ -275,6 +304,7 @@ class HouseGenerator:
         print("[SAMPLE] floor_polygons done", flush=True)
 
         print("[SAMPLE] Starting LIGHTS stage", flush=True)
+        lights_start = time.time()
         if partial_house.next_sampling_stage <= NextSamplingStage.LIGHTS:
             with advance_and_record_partial(partial_house):
                 print("[SAMPLE] Calling add_lights...", flush=True)
@@ -286,8 +316,13 @@ class HouseGenerator:
                     floor_polygons=floor_polygons,
                     ceiling_height=partial_house.house_structure.ceiling_height,
                 )
+        lights_duration = time.time() - lights_start
+        cumulative_time += lights_duration
+        print(f"[TIMING] LIGHTS stage: {lights_duration:.2f}s", flush=True)
+        print(f"[TIMING] Total so far: {cumulative_time:.2f}s", flush=True)
 
         print("[SAMPLE] Starting SKYBOX stage", flush=True)
+        skybox_start = time.time()
         if partial_house.next_sampling_stage <= NextSamplingStage.SKYBOX:
             with advance_and_record_partial(partial_house):
                 gfs.add_skybox(
@@ -296,9 +331,14 @@ class HouseGenerator:
                     pt_db=self.pt_db,
                     split=self.split,
                 )
+        skybox_duration = time.time() - skybox_start
+        cumulative_time += skybox_duration
+        print(f"[TIMING] SKYBOX stage: {skybox_duration:.2f}s", flush=True)
+        print(f"[TIMING] Total so far: {cumulative_time:.2f}s", flush=True)
 
         # NOTE: added after `randomize_wall_and_floor_materials` on purpose
         print("[SAMPLE] Starting EXTERIOR_WALLS stage", flush=True)
+        exterior_walls_start = time.time()
         if partial_house.next_sampling_stage <= NextSamplingStage.EXTERIOR_WALLS:
             with advance_and_record_partial(partial_house):
                 gfs.add_exterior_walls(
@@ -308,8 +348,13 @@ class HouseGenerator:
                     split=self.split,
                     boundary_groups=partial_house.house_structure.boundary_groups,
                 )
+        exterior_walls_duration = time.time() - exterior_walls_start
+        cumulative_time += exterior_walls_duration
+        print(f"[TIMING] EXTERIOR_WALLS stage: {exterior_walls_duration:.2f}s", flush=True)
+        print(f"[TIMING] Total so far: {cumulative_time:.2f}s", flush=True)
 
         print("[SAMPLE] Starting ROOMS stage", flush=True)
+        rooms_start = time.time()
         if partial_house.next_sampling_stage <= NextSamplingStage.ROOMS:
             with advance_and_record_partial(partial_house):
                 gfs.add_rooms(
@@ -321,7 +366,12 @@ class HouseGenerator:
                     room_type_map=partial_house.room_spec.room_type_map,
                     door_polygons=door_polygons,
                 )
+        rooms_duration = time.time() - rooms_start
+        cumulative_time += rooms_duration
+        print(f"[TIMING] ROOMS stage: {rooms_duration:.2f}s", flush=True)
+        print(f"[TIMING] Total so far: {cumulative_time:.2f}s", flush=True)
 
+        floor_objs_start = time.time()
         if partial_house.next_sampling_stage <= NextSamplingStage.FLOOR_OBJS:
             with advance_and_record_partial(partial_house):
                 gfs.add_floor_objects(
@@ -334,7 +384,12 @@ class HouseGenerator:
                 floor_objects = [*partial_house.objects]
                 gfs.randomize_object_colors(objects=floor_objects, pt_db=self.pt_db)
                 gfs.randomize_object_states(objects=floor_objects, pt_db=self.pt_db)
+        floor_objs_duration = time.time() - floor_objs_start
+        cumulative_time += floor_objs_duration
+        print(f"[TIMING] FLOOR_OBJS stage: {floor_objs_duration:.2f}s", flush=True)
+        print(f"[TIMING] Total so far: {cumulative_time:.2f}s", flush=True)
 
+        wall_objs_start = time.time()
         if partial_house.next_sampling_stage <= NextSamplingStage.WALL_OBJS:
             with advance_and_record_partial(partial_house):
                 gfs.add_wall_objects(
@@ -350,7 +405,12 @@ class HouseGenerator:
                 wall_objects = [*partial_house.objects[len(floor_objects) :]]
                 gfs.randomize_object_colors(objects=wall_objects, pt_db=self.pt_db)
                 gfs.randomize_object_states(objects=wall_objects, pt_db=self.pt_db)
+        wall_objs_duration = time.time() - wall_objs_start
+        cumulative_time += wall_objs_duration
+        print(f"[TIMING] WALL_OBJS stage: {wall_objs_duration:.2f}s", flush=True)
+        print(f"[TIMING] Total so far: {cumulative_time:.2f}s", flush=True)
 
+        small_objs_start = time.time()
         if partial_house.next_sampling_stage <= NextSamplingStage.SMALL_OBJS:
             with advance_and_record_partial(partial_house):
                 gfs.add_small_objects(
@@ -365,6 +425,10 @@ class HouseGenerator:
                 ]
                 gfs.randomize_object_colors(objects=small_objects, pt_db=self.pt_db)
                 gfs.randomize_object_states(objects=small_objects, pt_db=self.pt_db)
+        small_objs_duration = time.time() - small_objs_start
+        cumulative_time += small_objs_duration
+        print(f"[TIMING] SMALL_OBJS stage: {small_objs_duration:.2f}s", flush=True)
+        print(f"[TIMING] Total so far: {cumulative_time:.2f}s", flush=True)
 
         assign_layer_to_rooms(partial_house=partial_house)
 
