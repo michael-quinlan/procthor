@@ -76,7 +76,7 @@ def default_add_small_objects(
 ) -> None:
     """Add small objects to the house."""
     controller.reset()
-    controller.step(action="ResetObjectFilter")
+    controller.step(action="ResetObjectFilter", renderImage=False)
 
     # Timing: CreateHouse
     create_house_start = time.time()
@@ -87,7 +87,7 @@ def default_add_small_objects(
     print(f"[SMALL_OBJS] CreateHouse: {create_house_time:.2f}s")
 
     assert event, "Unable to CreateHouse!"
-    controller.step(action="SetObjectFilter", objectIds=[])
+    controller.step(action="SetObjectFilter", objectIds=[], renderImage=False)
 
     # NOTE: Get the objects in the room.
     objects = [
@@ -200,7 +200,7 @@ def default_add_small_objects(
 
                 # NOTE: Some objects have multiple sim object receptacles within it,
                 # so we need to specify all of them as possible receptacle object ids.
-                event = controller.step(action="ResetObjectFilter")
+                event = controller.step(action="ResetObjectFilter", renderImage=False)
                 receptacle_object_ids = [
                     obj["objectId"]
                     for obj in event.metadata["objects"]
@@ -223,7 +223,7 @@ def default_add_small_objects(
                     event
                 ), f"SpawnAsset failed for {chosen_asset_id} with {event.metadata['actionReturn']}!"
                 controller.step(
-                    action="SetObjectFilter", objectIds=[generated_object_id]
+                    action="SetObjectFilter", objectIds=[generated_object_id], renderImage=False
                 )
 
                 obj_type = pt_db.ASSET_ID_DATABASE[chosen_asset_id]["objectType"]
