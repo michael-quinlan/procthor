@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import time
 from typing import Dict, List, Optional
 
 import matplotlib.pyplot as plt
@@ -245,14 +246,20 @@ def generate_houses(
                 try:
                     # Reset partial_house before each attempt to ensure fresh generation
                     house_generator.partial_house = None
-                    print(f"DEBUG: Starting house_generator.sample() for house {i}")
-                    import sys; sys.stdout.flush()
+
+                    # Timing instrumentation
+                    t_start = time.time()
                     house, _ = house_generator.sample()
-                    print(f"DEBUG: house_generator.sample() completed for house {i}")
-                    import sys; sys.stdout.flush()
+                    t_after_sample = time.time()
                     house.validate(house_generator.controller)
-                    print(f"DEBUG: house.validate() completed for house {i}")
-                    import sys; sys.stdout.flush()
+                    t_after_validate = time.time()
+
+                    # Calculate timing
+                    sample_time = t_after_sample - t_start
+                    validate_time = t_after_validate - t_after_sample
+                    total_time = t_after_validate - t_start
+
+                    print(f"House {i}: sample={sample_time:.1f}s, validate={validate_time:.1f}s, total={total_time:.1f}s")
 
                     # Skip houses with warnings and retry
                     if house.data.get("metadata", {}).get("warnings"):
