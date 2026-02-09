@@ -36,7 +36,7 @@ class AgentPose(TypedDict):
     """The starting camera horizon of the agent."""
 
 
-def generate_starting_pose(rooms: Dict[int, ProceduralRoom]) -> AgentPose:
+def generate_starting_pose(rooms: Dict[int, ProceduralRoom], grid_size: float = 0.25) -> AgentPose:
     """Choose the starting agent pose in the house."""
 
     rooms = list(rooms.values())
@@ -48,8 +48,8 @@ def generate_starting_pose(rooms: Dict[int, ProceduralRoom]) -> AgentPose:
             mid_x = (x0 + x1) / 2
             mid_z = (z0 + z1) / 2
 
-            x = round(mid_x / GRID_SIZE) * GRID_SIZE
-            z = round(mid_z / GRID_SIZE) * GRID_SIZE
+            x = round(mid_x / grid_size) * grid_size
+            z = round(mid_z / grid_size) * grid_size
             break
     else:
         raise Exception("Unable to place the agent in any room in the house!")
