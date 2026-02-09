@@ -645,8 +645,8 @@ def main() -> int:
     parser.add_argument(
         "--grid-size",
         type=float,
-        default=0.25,
-        help="Navigation grid size for agent pose generation (default: 0.25).",
+        default=0.5,
+        help="Navigation grid size for agent pose generation (default: 0.5).",
     )
 
     args = parser.parse_args()
