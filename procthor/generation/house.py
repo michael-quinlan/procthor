@@ -53,6 +53,7 @@ class House:
     rooms: Dict[int, ProceduralRoom]  # TODO: Should be `rooms_map`
     interior_boundary: np.array
     room_spec: RoomSpec
+    grid_size: float = 0.25
     add_metadata: bool = True
 
     def __attrs_post_init__(self) -> None:
@@ -98,7 +99,7 @@ class House:
 
     def choose_agent_pose(self) -> AgentPose:
         """Generate a starting position for the default agent in the house."""
-        return generate_starting_pose(self.rooms)
+        return generate_starting_pose(self.rooms, grid_size=self.grid_size)
 
     def validate(self, controller: Controller) -> Dict[str, str]:
         """Validate that the house is useable.
@@ -274,6 +275,7 @@ class PartialHouse:
 
     rooms: Optional[Dict[int, ProceduralRoom]] = None  # TODO: Should be `rooms_map`
     next_sampling_stage: Optional[NextSamplingStage] = NextSamplingStage.STRUCTURE
+    grid_size: float = 0.25
 
     @classmethod
     def from_structure_and_room_spec(
@@ -353,6 +355,7 @@ class PartialHouse:
             rooms=self.rooms,
             interior_boundary=self.house_structure.interior_boundary,
             room_spec=self.room_spec,
+            grid_size=self.grid_size,
         )
 
     def advance_sampling_stage(self):

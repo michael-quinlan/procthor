@@ -160,6 +160,7 @@ def _get_or_create_house_generator(
     house_index: int,
     bedrooms: Optional[int],
     bathrooms: Optional[int],
+    grid_size: float = 0.25,
 ) -> HouseGenerator:
     """Get or create a HouseGenerator for the current process.
 
@@ -199,6 +200,7 @@ def _get_or_create_house_generator(
             split=split,
             seed=worker_seed,
             room_spec_sampler=room_spec_sampler,
+            grid_size=grid_size,
         )
 
     return _house_generators[pid]
@@ -218,6 +220,7 @@ def _worker_generate_house(
     image_dir: str,
     bedrooms: Optional[int],
     bathrooms: Optional[int],
+    grid_size: float = 0.25,
 ) -> Tuple[Optional[Dict], bool]:
     """Worker function for parallel house generation.
 
@@ -231,6 +234,7 @@ def _worker_generate_house(
             house_index=house_index,
             bedrooms=bedrooms,
             bathrooms=bathrooms,
+            grid_size=grid_size,
         )
 
         # Sample spec ONCE per house slot
@@ -318,6 +322,7 @@ def generate_houses(
     image_dir: str = "./images/",
     bedrooms: Optional[int] = None,
     bathrooms: Optional[int] = None,
+    grid_size: float = 0.25,
 ) -> List[Dict]:
     """Generate a list of house data dictionaries.
 
@@ -330,6 +335,7 @@ def generate_houses(
         image_dir: Directory to save images (if save_images is True).
         bedrooms: If set, only generate houses with exactly this many bedrooms.
         bathrooms: If set, only generate houses with exactly this many bathrooms.
+        grid_size: Navigation grid size for agent pose generation (default: 0.25).
 
     Returns:
         List of house data dictionaries.
@@ -370,6 +376,7 @@ def generate_houses(
         split=split,
         seed=seed,
         room_spec_sampler=room_spec_sampler,
+        grid_size=grid_size,
     )
 
     # Create image directory if needed
@@ -461,6 +468,7 @@ def generate_houses_parallel(
     image_dir: str = "./images/",
     bedrooms: Optional[int] = None,
     bathrooms: Optional[int] = None,
+    grid_size: float = 0.25,
 ) -> List[Dict]:
     """Generate houses in parallel using multiprocessing.
 
@@ -474,6 +482,7 @@ def generate_houses_parallel(
         image_dir: Directory to save images (if save_images is True).
         bedrooms: If set, only generate houses with exactly this many bedrooms.
         bathrooms: If set, only generate houses with exactly this many bathrooms.
+        grid_size: Navigation grid size for agent pose generation (default: 0.25).
 
     Returns:
         List of house data dictionaries.
@@ -524,6 +533,7 @@ def generate_houses_parallel(
                         image_dir,
                         bedrooms,
                         bathrooms,
+                        grid_size,
                     )
                     for i in range(num_houses)
                 ],
@@ -632,6 +642,12 @@ def main() -> int:
         default=1,
         help="Number of worker processes for parallel generation (default: 1, single-threaded).",
     )
+    parser.add_argument(
+        "--grid-size",
+        type=float,
+        default=0.5,
+        help="Navigation grid size for agent pose generation (default: 0.5).",
+    )
 
     args = parser.parse_args()
 
@@ -650,6 +666,7 @@ def main() -> int:
             image_dir=args.image_dir,
             bedrooms=args.bedrooms,
             bathrooms=args.bathrooms,
+            grid_size=args.grid_size,
         )
     else:
         houses = generate_houses_parallel(
@@ -662,6 +679,7 @@ def main() -> int:
             image_dir=args.image_dir,
             bedrooms=args.bedrooms,
             bathrooms=args.bathrooms,
+            grid_size=args.grid_size,
         )
 
     if not houses:

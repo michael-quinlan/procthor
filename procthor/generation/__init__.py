@@ -99,6 +99,7 @@ class HouseGenerator:
     controller: Optional[Controller] = None
     partial_house: Optional[PartialHouse] = None
     pt_db: ProcTHORDatabase = DEFAULT_PROCTHOR_DATABASE
+    grid_size: float = 0.25
     generation_functions: GenerationFunctions = Factory(
         _create_default_generation_functions
     )
@@ -209,6 +210,7 @@ class HouseGenerator:
                 house_structure=house_structure,
                 room_spec=room_spec,
             )
+            partial_house.grid_size = self.grid_size
 
             # Early validation: check room proportions before any Unity operations
             passed, reason = validate_room_proportions(partial_house)
