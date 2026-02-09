@@ -10,10 +10,11 @@ import argparse
 import gzip
 import json
 import logging
+import multiprocessing
 import os
 import sys
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -148,6 +149,148 @@ def plot_house(house, ax, title):
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+# Global dict for per-PID HouseGenerator instances (for multiprocessing)
+_house_generators = {}
+
+
+def _get_or_create_house_generator(
+    split: str,
+    seed: Optional[int],
+    house_index: int,
+    bedrooms: Optional[int],
+    bathrooms: Optional[int],
+) -> HouseGenerator:
+    """Get or create a HouseGenerator for the current process.
+
+    Each worker process gets its own HouseGenerator with its own Controller.
+    """
+    pid = os.getpid()
+    if pid not in _house_generators:
+        # Create a filtered sampler if bedroom/bathroom constraints are set
+        if bedrooms is not None or bathrooms is not None:
+            from procthor.generation.room_specs import RoomSpecSampler
+            from procthor.generation.hallway_room_specs import (
+                HALLWAY_HOUSE_2BR_1BA, HALLWAY_HOUSE_3BR_2BA, HALLWAY_HOUSE_4BR_2BA,
+                NO_HALLWAY_1BR_1BA, NO_HALLWAY_2BR_1BA,
+            )
+            spec_map_by_bedrooms = {
+                1: [(1, 1, NO_HALLWAY_1BR_1BA)],
+                2: [(2, 1, HALLWAY_HOUSE_2BR_1BA), (2, 1, NO_HALLWAY_2BR_1BA)],
+                3: [(3, 2, HALLWAY_HOUSE_3BR_2BA)],
+                4: [(4, 2, HALLWAY_HOUSE_4BR_2BA)],
+            }
+            matching_specs = []
+            if bedrooms in spec_map_by_bedrooms:
+                for br, ba, spec in spec_map_by_bedrooms[bedrooms]:
+                    if bathrooms is None or ba == bathrooms:
+                        matching_specs.append(spec)
+            if matching_specs:
+                room_spec_sampler = RoomSpecSampler(matching_specs)
+            else:
+                room_spec_sampler = ALL_ROOM_SPEC_SAMPLER
+        else:
+            room_spec_sampler = ALL_ROOM_SPEC_SAMPLER
+
+        # Compute seed for this worker
+        worker_seed = seed + house_index if seed is not None else None
+
+        _house_generators[pid] = HouseGenerator(
+            split=split,
+            seed=worker_seed,
+            room_spec_sampler=room_spec_sampler,
+        )
+
+    return _house_generators[pid]
+
+
+def _worker_args_wrapper(args: Tuple) -> Tuple[Optional[Dict], bool]:
+    """Wrapper to unpack tuple arguments for imap_unordered."""
+    return _worker_generate_house(*args)
+
+
+def _worker_generate_house(
+    house_index: int,
+    split: str,
+    seed: Optional[int],
+    max_retries: int,
+    save_images: bool,
+    image_dir: str,
+    bedrooms: Optional[int],
+    bathrooms: Optional[int],
+) -> Tuple[Optional[Dict], bool]:
+    """Worker function for parallel house generation.
+
+    Returns:
+        Tuple of (house_data_dict, success_bool). house_data_dict is None if generation failed.
+    """
+    try:
+        house_generator = _get_or_create_house_generator(
+            split=split,
+            seed=seed,
+            house_index=house_index,
+            bedrooms=bedrooms,
+            bathrooms=bathrooms,
+        )
+
+        # Sample spec ONCE per house slot
+        target_spec = house_generator.room_spec_sampler.sample()
+        house_generator.room_spec = target_spec
+
+        retries = 0
+        while retries < max_retries:
+            try:
+                house_generator.partial_house = None
+
+                # Timing instrumentation
+                t_start = time.time()
+                house, _ = house_generator.sample()
+                t_after_sample = time.time()
+                house.validate(house_generator.controller)
+                t_after_validate = time.time()
+
+                # Calculate timing
+                sample_time = t_after_sample - t_start
+                validate_time = t_after_validate - t_after_sample
+                total_time = t_after_validate - t_start
+
+                print(f"House {house_index}: sample={sample_time:.1f}s, validate={validate_time:.1f}s, total={total_time:.1f}s")
+
+                # Skip houses with warnings and retry
+                if house.data.get("metadata", {}).get("warnings"):
+                    print(f"DEBUG: House {house_index} has warnings: {house.data.get('metadata', {}).get('warnings')}")
+                    retries += 1
+                    if retries >= max_retries:
+                        logger.warning(f"House {house_index} failed due to warnings after {max_retries} retries")
+                        return None, False
+                    continue
+
+                # Validate final room proportions
+                passed, reason = validate_final_proportions(house)
+                print(f"DEBUG: House {house_index} proportion check: passed={passed}, reason={reason}")
+                sys.stdout.flush()
+                if not passed:
+                    logger.debug(f"House {house_index} failed proportion check: {reason}")
+                    retries += 1
+                    continue
+
+                # Save image if requested
+                if save_images:
+                    os.makedirs(image_dir, exist_ok=True)
+                    image_path = os.path.join(image_dir, f"house_{house_index:04d}.png")
+                    save_house_image(house, image_path, house_index)
+
+                return house.data, True
+            except Exception as e:
+                retries += 1
+                if retries >= max_retries:
+                    logger.warning(f"Failed to generate house {house_index} after {max_retries} retries: {e}")
+                    return None, False
+
+        return None, False
+    except Exception as e:
+        logger.error(f"Worker error for house {house_index}: {e}")
+        return None, False
 
 
 def save_house_image(house, image_path: str, house_num: int) -> None:
@@ -308,6 +451,106 @@ def generate_houses(
     return houses
 
 
+def generate_houses_parallel(
+    num_houses: int,
+    num_workers: int,
+    split: str,
+    seed: Optional[int] = None,
+    max_retries: int = 3,
+    save_images: bool = False,
+    image_dir: str = "./images/",
+    bedrooms: Optional[int] = None,
+    bathrooms: Optional[int] = None,
+) -> List[Dict]:
+    """Generate houses in parallel using multiprocessing.
+
+    Args:
+        num_houses: Number of houses to generate.
+        num_workers: Number of worker processes.
+        split: Data split to use ('train', 'val', or 'test').
+        seed: Optional random seed for reproducibility.
+        max_retries: Maximum retries per house on failure.
+        save_images: If True, save a PNG floorplan for each house.
+        image_dir: Directory to save images (if save_images is True).
+        bedrooms: If set, only generate houses with exactly this many bedrooms.
+        bathrooms: If set, only generate houses with exactly this many bathrooms.
+
+    Returns:
+        List of house data dictionaries.
+    """
+    # Create a filtered sampler if bedroom/bathroom constraints are set
+    if bedrooms is not None or bathrooms is not None:
+        from procthor.generation.room_specs import RoomSpecSampler
+        from procthor.generation.hallway_room_specs import (
+            HALLWAY_HOUSE_2BR_1BA, HALLWAY_HOUSE_3BR_2BA, HALLWAY_HOUSE_4BR_2BA,
+            NO_HALLWAY_1BR_1BA, NO_HALLWAY_2BR_1BA,
+        )
+        spec_map_by_bedrooms = {
+            1: [(1, 1, NO_HALLWAY_1BR_1BA)],
+            2: [(2, 1, HALLWAY_HOUSE_2BR_1BA), (2, 1, NO_HALLWAY_2BR_1BA)],
+            3: [(3, 2, HALLWAY_HOUSE_3BR_2BA)],
+            4: [(4, 2, HALLWAY_HOUSE_4BR_2BA)],
+        }
+        matching_specs = []
+        if bedrooms in spec_map_by_bedrooms:
+            for br, ba, spec in spec_map_by_bedrooms[bedrooms]:
+                if bathrooms is None or ba == bathrooms:
+                    matching_specs.append(spec)
+        if matching_specs:
+            room_spec_sampler = RoomSpecSampler(matching_specs)
+            ba_str = f"{bathrooms}BA" if bathrooms else "any BA"
+            logger.info(f"Using {bedrooms}BR/{ba_str} specs ({len(matching_specs)} options)")
+        else:
+            logger.warning(f"No specific spec for {bedrooms}BR/{bathrooms}BA, using ALL_ROOM_SPEC_SAMPLER")
+            room_spec_sampler = ALL_ROOM_SPEC_SAMPLER
+    else:
+        room_spec_sampler = ALL_ROOM_SPEC_SAMPLER
+
+    houses = []
+    failed_count = 0
+
+    try:
+        with multiprocessing.Pool(processes=num_workers) as pool:
+            # Use imap_unordered for real-time progress updates
+            results = pool.imap_unordered(
+                _worker_args_wrapper,
+                [
+                    (
+                        i,
+                        split,
+                        seed,
+                        max_retries,
+                        save_images,
+                        image_dir,
+                        bedrooms,
+                        bathrooms,
+                    )
+                    for i in range(num_houses)
+                ],
+            )
+
+            # Collect results with progress bar
+            for house_data, success in tqdm(results, total=num_houses, desc="Generating houses", unit="house"):
+                if success and house_data is not None:
+                    houses.append(house_data)
+                else:
+                    failed_count += 1
+    finally:
+        # Cleanup all worker generators
+        for pid, gen in _house_generators.items():
+            try:
+                if gen.controller is not None:
+                    gen.controller.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping controller for PID {pid}: {e}")
+        _house_generators.clear()
+
+    if failed_count > 0:
+        logger.warning(f"Failed to generate {failed_count} houses out of {num_houses} requested.")
+
+    return houses
+
+
 def save_dataset(houses: List[Dict], output_path: str) -> None:
     """Save houses to a gzipped JSON file.
 
@@ -383,23 +626,43 @@ def main() -> int:
         default=None,
         help="Constrain to houses with exactly this many bathrooms.",
     )
+    parser.add_argument(
+        "-w", "--num-workers",
+        type=int,
+        default=1,
+        help="Number of worker processes for parallel generation (default: 1, single-threaded).",
+    )
 
     args = parser.parse_args()
 
-    logger.info(f"Generating {args.num_houses} houses (split={args.split}, seed={args.seed})")
+    logger.info(f"Generating {args.num_houses} houses (split={args.split}, seed={args.seed}, num_workers={args.num_workers})")
     if args.save_images:
         logger.info(f"Saving images to {args.image_dir}")
 
-    houses = generate_houses(
-        num_houses=args.num_houses,
-        split=args.split,
-        seed=args.seed,
-        max_retries=args.max_retries,
-        save_images=args.save_images,
-        image_dir=args.image_dir,
-        bedrooms=args.bedrooms,
-        bathrooms=args.bathrooms,
-    )
+    # Choose single-threaded or parallel generation
+    if args.num_workers == 1:
+        houses = generate_houses(
+            num_houses=args.num_houses,
+            split=args.split,
+            seed=args.seed,
+            max_retries=args.max_retries,
+            save_images=args.save_images,
+            image_dir=args.image_dir,
+            bedrooms=args.bedrooms,
+            bathrooms=args.bathrooms,
+        )
+    else:
+        houses = generate_houses_parallel(
+            num_houses=args.num_houses,
+            num_workers=args.num_workers,
+            split=args.split,
+            seed=args.seed,
+            max_retries=args.max_retries,
+            save_images=args.save_images,
+            image_dir=args.image_dir,
+            bedrooms=args.bedrooms,
+            bathrooms=args.bathrooms,
+        )
 
     if not houses:
         logger.error("No houses were generated successfully.")
