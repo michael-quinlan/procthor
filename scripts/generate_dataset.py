@@ -12,6 +12,8 @@ import json
 import logging
 import multiprocessing
 import os
+import shutil
+import signal
 import sys
 import time
 from typing import Dict, List, Optional, Tuple
@@ -34,6 +36,31 @@ ROOM_TYPE_TO_COLOR = {
 
 # Conversion constant
 SQM_TO_SQFT = 10.7639
+
+# Timeout for house generation (in seconds)
+# This prevents workers from hanging indefinitely if the AI2-THOR controller gets stuck
+HOUSE_GENERATION_TIMEOUT = 300  # 5 minutes per house
+
+
+class TimeoutException(Exception):
+    """Raised when a house generation times out."""
+    pass
+
+
+def _timeout_handler(signum, frame):
+    """Signal handler for timeout."""
+    raise TimeoutException("House generation timed out")
+
+
+def _setup_timeout(timeout_seconds: int) -> None:
+    """Setup a timeout alarm for the current process."""
+    signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(timeout_seconds)
+
+
+def _cancel_timeout() -> None:
+    """Cancel any pending timeout alarm."""
+    signal.alarm(0)
 
 
 def validate_final_proportions(house) -> tuple:
@@ -221,6 +248,7 @@ def _worker_generate_house(
     bedrooms: Optional[int],
     bathrooms: Optional[int],
     grid_size: float = 0.25,
+    output_dir: Optional[str] = None,
 ) -> Tuple[Optional[Dict], bool]:
     """Worker function for parallel house generation.
 
@@ -246,46 +274,73 @@ def _worker_generate_house(
             try:
                 house_generator.partial_house = None
 
-                # Timing instrumentation
-                t_start = time.time()
-                house, _ = house_generator.sample()
-                t_after_sample = time.time()
-                house.validate(house_generator.controller)
-                t_after_validate = time.time()
+                # Set timeout for this generation attempt
+                _setup_timeout(HOUSE_GENERATION_TIMEOUT)
 
-                # Calculate timing
-                sample_time = t_after_sample - t_start
-                validate_time = t_after_validate - t_after_sample
-                total_time = t_after_validate - t_start
+                try:
+                    # Timing instrumentation
+                    t_start = time.time()
+                    house, _ = house_generator.sample()
+                    t_after_sample = time.time()
+                    house.validate(house_generator.controller)
+                    t_after_validate = time.time()
 
-                print(f"House {house_index}: sample={sample_time:.1f}s, validate={validate_time:.1f}s, total={total_time:.1f}s")
+                    # Cancel timeout on success
+                    _cancel_timeout()
 
-                # Skip houses with warnings and retry
-                if house.data.get("metadata", {}).get("warnings"):
-                    print(f"DEBUG: House {house_index} has warnings: {house.data.get('metadata', {}).get('warnings')}")
+                    # Calculate timing
+                    sample_time = t_after_sample - t_start
+                    validate_time = t_after_validate - t_after_sample
+                    total_time = t_after_validate - t_start
+
+                    print(f"House {house_index}: sample={sample_time:.1f}s, validate={validate_time:.1f}s, total={total_time:.1f}s")
+
+                    # Skip houses with warnings and retry
+                    if house.data.get("metadata", {}).get("warnings"):
+                        print(f"DEBUG: House {house_index} has warnings: {house.data.get('metadata', {}).get('warnings')}")
+                        retries += 1
+                        if retries >= max_retries:
+                            logger.warning(f"House {house_index} failed due to warnings after {max_retries} retries")
+                            return None, False
+                        continue
+
+                    # Validate final room proportions
+                    passed, reason = validate_final_proportions(house)
+                    print(f"DEBUG: House {house_index} proportion check: passed={passed}, reason={reason}")
+                    sys.stdout.flush()
+                    if not passed:
+                        logger.debug(f"House {house_index} failed proportion check: {reason}")
+                        retries += 1
+                        continue
+
+                    # Save image if requested
+                    if save_images:
+                        os.makedirs(image_dir, exist_ok=True)
+                        image_path = os.path.join(image_dir, f"house_{house_index:04d}.png")
+                        save_house_image(house, image_path, house_index)
+
+                    # Write house to disk immediately if output_dir is provided
+                    if output_dir:
+                        save_house_json(house.data, output_dir, house_index)
+
+                    return house.data, True
+                except TimeoutException:
+                    _cancel_timeout()
                     retries += 1
+                    logger.warning(f"House {house_index} generation timed out (attempt {retries}/{max_retries})")
+                    # Try to stop the controller to recover
+                    try:
+                        if house_generator.controller is not None:
+                            house_generator.controller.stop()
+                            house_generator.controller = None
+                    except Exception as e:
+                        logger.warning(f"Error stopping controller after timeout: {e}")
                     if retries >= max_retries:
-                        logger.warning(f"House {house_index} failed due to warnings after {max_retries} retries")
+                        logger.warning(f"House {house_index} failed after {max_retries} timeout retries")
                         return None, False
                     continue
-
-                # Validate final room proportions
-                passed, reason = validate_final_proportions(house)
-                print(f"DEBUG: House {house_index} proportion check: passed={passed}, reason={reason}")
-                sys.stdout.flush()
-                if not passed:
-                    logger.debug(f"House {house_index} failed proportion check: {reason}")
-                    retries += 1
-                    continue
-
-                # Save image if requested
-                if save_images:
-                    os.makedirs(image_dir, exist_ok=True)
-                    image_path = os.path.join(image_dir, f"house_{house_index:04d}.png")
-                    save_house_image(house, image_path, house_index)
-
-                return house.data, True
             except Exception as e:
+                _cancel_timeout()
                 retries += 1
                 if retries >= max_retries:
                     logger.warning(f"Failed to generate house {house_index} after {max_retries} retries: {e}")
@@ -469,6 +524,7 @@ def generate_houses_parallel(
     bedrooms: Optional[int] = None,
     bathrooms: Optional[int] = None,
     grid_size: float = 0.25,
+    output_dir: Optional[str] = None,
 ) -> List[Dict]:
     """Generate houses in parallel using multiprocessing.
 
@@ -534,6 +590,7 @@ def generate_houses_parallel(
                         bedrooms,
                         bathrooms,
                         grid_size,
+                        output_dir,
                     )
                     for i in range(num_houses)
                 ],
@@ -561,20 +618,50 @@ def generate_houses_parallel(
     return houses
 
 
+def save_house_json(house_data: Dict, output_dir: str, house_index: int) -> None:
+    """Save a single house to a JSON file in the output directory.
+
+    Args:
+        house_data: House data dictionary.
+        output_dir: Directory to save the house JSON file.
+        house_index: Index of the house (used for filename).
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Determine house type suffix based on metadata
+    house_type = "regular"
+    if "metadata" in house_data:
+        metadata = house_data["metadata"]
+        if metadata.get("has_hallway"):
+            house_type = "hallway"
+
+    house_path = os.path.join(output_dir, f"house_{house_index:05d}_{house_type}.json")
+    with open(house_path, "w", encoding="UTF-8") as f:
+        json.dump(house_data, f)
+
+
 def save_dataset(houses: List[Dict], output_path: str) -> None:
-    """Save houses to a gzipped JSON file.
+    """Save houses to individual JSON files in a directory.
 
     Args:
         houses: List of house data dictionaries.
-        output_path: Output file path (should end with .json.gz).
+        output_path: Output directory path.
     """
-    if not output_path.endswith(".json.gz"):
-        output_path = f"{output_path}.json.gz"
+    # Remove any file extensions if provided
+    if output_path.endswith(".json.gz"):
+        output_dir = output_path.replace(".json.gz", "")
+    elif output_path.endswith(".tar.gz"):
+        output_dir = output_path.replace(".tar.gz", "")
+    else:
+        output_dir = output_path
 
-    logger.info(f"Saving {len(houses)} houses to {output_path}...")
-    with gzip.open(output_path, "wt", encoding="UTF-8") as f:
-        json.dump(houses, f)
-    logger.info(f"Dataset saved successfully.")
+    logger.info(f"Saving {len(houses)} houses to {output_dir}...")
+
+    # Save each house individually
+    for i, house_data in enumerate(houses):
+        save_house_json(house_data, output_dir, i)
+
+    logger.info(f"Successfully saved {len(houses)} houses to {output_dir}")
 
 
 def main() -> int:
@@ -648,12 +735,32 @@ def main() -> int:
         default=0.5,
         help="Navigation grid size for agent pose generation (default: 0.5).",
     )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help="Timeout in seconds for each house generation attempt (default: 300 = 5 minutes). Set to 0 to disable.",
+    )
 
     args = parser.parse_args()
+
+    # Update global timeout if specified
+    global HOUSE_GENERATION_TIMEOUT
+    if args.timeout > 0:
+        HOUSE_GENERATION_TIMEOUT = args.timeout
+        logger.info(f"House generation timeout set to {HOUSE_GENERATION_TIMEOUT} seconds")
 
     logger.info(f"Generating {args.num_houses} houses (split={args.split}, seed={args.seed}, num_workers={args.num_workers})")
     if args.save_images:
         logger.info(f"Saving images to {args.image_dir}")
+
+    # Determine output directory for individual house files
+    if args.output.endswith(".json.gz"):
+        output_dir = args.output.replace(".json.gz", "")
+    elif args.output.endswith(".tar.gz"):
+        output_dir = args.output.replace(".tar.gz", "")
+    else:
+        output_dir = args.output
 
     # Choose single-threaded or parallel generation
     if args.num_workers == 1:
@@ -680,13 +787,14 @@ def main() -> int:
             bedrooms=args.bedrooms,
             bathrooms=args.bathrooms,
             grid_size=args.grid_size,
+            output_dir=output_dir,
         )
 
     if not houses:
         logger.error("No houses were generated successfully.")
         return 1
 
-    save_dataset(houses, args.output)
+    save_dataset(houses, output_dir)
     logger.info(f"Successfully generated {len(houses)} houses.")
     return 0
 
