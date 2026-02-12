@@ -274,6 +274,12 @@ def _worker_generate_house(
             try:
                 house_generator.partial_house = None
 
+                # Reset seed for this specific house to avoid:
+                # 1. Seed reuse (same worker generating multiple houses with same seed)
+                # 2. Global random state corruption (multiple generators in same process)
+                if seed is not None:
+                    house_generator.set_seed(seed + house_index)
+
                 # Set timeout for this generation attempt
                 _setup_timeout(HOUSE_GENERATION_TIMEOUT)
 
